@@ -377,3 +377,54 @@ test("Visible-column facets and filters use raw CSV values and the displayed sal
  const saved = await data.savePreferences(owner,{settings:{currentView:{...initial.settings.currentView,filters}},settingsOnly:true});
  assert.deepEqual(saved.settings.currentView.filters.categories,filters.categories);
 });
+
+test("Untagged CSV rows and inclusive price, quantity and sales ranges match on both paths",async()=>{
+ const headers = ["Lookup","Tags","Your Price","Low Price","Market Price","TCG Marketplace Price","Quantity"];
+ const records = [
+  ["11","","$1,234.56","1.00","2.00","3.00","007"],
+  ["22","listed","$1,234.57","1.00","2.00","3.00","9"],
+  ["33","\t\u00A0","N/A","text","2.00","3.00","1"],
+  ["44","None","$1,235.00","1.00","2.00","3.00","2"],
+  ["55","listed","12junk","1.00","2.00","3.00","007"],
+ ];
+ await upload([headers,...records].map(row=>row.map(csv.csvCell).join(",")).join("\n"));
+ await upload("Lookup,Your Price,Quantity\n66,1234.56,7","update");
+ const first = Date.UTC(2026,0,1), second = Date.UTC(2026,0,8);
+ const putMarket = sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data,detail=excluded.detail");
+ for (const [id,units] of [["11",3],["66",4]]) {
+  const key = "product:"+id+"|row:0";
+  putMarket.run(owner+"|"+key,owner,key,id,second,JSON.stringify({unitsSold:units+10,available:true}),JSON.stringify({history:[{date:first,units:10},{date:second,units}]}));
+ }
+ const meta = await sync.syncMetadata(owner,null);
+ const snapshot = await sync.syncInventory(owner,new URLSearchParams({version:meta.version}));
+ const entries = local.indexInventory(snapshot.rows);
+ const matches = async (filters, ids) => {
+  const input = {filters:{...domain.emptyFilters,...filters}};
+  const collect = rows => rows.map(row=>row["csv:Lookup"]).sort();
+  assert.deepEqual(collect(local.queryLocalInventory(entries,input,24).rows),ids);
+  assert.deepEqual(collect((await data.queryCards(owner,input)).rows),ids);
+ };
+ await matches({categories:{"csv:Tags":[""]}},["11","33","66"]);
+ await matches({categories:{"csv:Tags":["","listed"]}},["11","22","33","55","66"]);
+ await matches({categories:{"csv:Tags":["None"]}},["44"]);
+ await matches({numeric:[{field:"csv:Your Price",min:"",max:"1234.56"}]},["11","66"]);
+ await matches({numeric:[{field:"csv:Quantity",min:"7",max:"7"}]},["11","55","66"]);
+ for (const [field,minimum] of [["csv:Low Price","1"],["csv:Market Price","2"],["csv:TCG Marketplace Price","3"]]) {
+  assert(domain.isNumericFilterColumn(field));
+  await matches({numeric:[{field,min:minimum,max:minimum}]},field==="csv:Low Price" ? ["11","22","44","55"] : ["11","22","33","44","55"]);
+ }
+ const date = "2026-01-08";
+ const filters = {categories:{"csv:Tags":[""]},dateFrom:date,dateTo:date,numeric:[
+  {field:"unitsSold",min:"3",max:"3"},
+  {field:"csv:Your Price",min:"1234.56",max:"1234.56"},
+  {field:"csv:Quantity",min:"7",max:"7"},
+ ]};
+ await matches(filters,["11"]);
+ const input = {filters:{...domain.emptyFilters,...filters}};
+ const localCsv = await local.localExport(entries,input,meta.headers,24,false).text();
+ const serverCsv = await (await data.exportInventory(owner,input)).text();
+ assert.deepEqual(csv.parseCSV(localCsv),csv.parseCSV(serverCsv));
+ const saved = await data.savePreferences(owner,{settings:{currentView:{filters:input.filters}},settingsOnly:true});
+ assert.deepEqual(saved.settings.currentView.filters.numeric,filters.numeric);
+ assert.deepEqual(saved.settings.currentView.filters.categories,filters.categories);
+});

@@ -1,4 +1,4 @@
-import { columns, csvColumnKey, inventoryColumns, isCategoryValue, type CategoryValue, type Filters, type Preferences } from "./domain";
+import { columns, csvColumnKey, inventoryColumns, isCategoryValue, isBlankCategory, isNumericFilterColumn, isTagsColumn, numericFilterValue, type CategoryValue, type Filters, type Preferences } from "./domain";
 import { csvCell } from "./csv";
 
 export type SyncCard = {
@@ -43,7 +43,6 @@ export function indexInventory(cards: SyncCard[]) {
 }
 type Entry = ReturnType<typeof indexInventory>[number];
 const salesWindowColumns = new Set(["unitsSold","historyFrom","historyTo"]);
-const numericFields = new Set(columns.filter(column=>["number","money","percent","score"].includes(column.kind)).map(column=>column.key));
 const asciiLower = (value: string) => value.replace(/[A-Z]/g,c=>c.toLowerCase());
 const ascending = (a: string|number,b: string|number) =>
   typeof a === typeof b ? a < b ? -1 : a > b ? 1 : 0 : typeof a === "number" ? -1 : 1;
@@ -102,18 +101,26 @@ function selectRows(entries: Entry[], input: Input, staleHours: number) {
   const categories = Object.entries(f?.categories ?? {}).flatMap(([key,values])=>{
     const known = columns.some(column=>column.key===key) ||
       key.startsWith("csv:") && entries.some(entry=>Object.hasOwn(entry.row,key));
+    const includeNone = known && isTagsColumn(key) && Array.isArray(values) && values.includes("");
     const choices = known && Array.isArray(values) ? values.filter(isCategoryValue) : [];
-    return choices.length ? [[key,new Set(choices)] as const] : [];
+    return choices.length || includeNone ? [[key,new Set(choices),includeNone] as const] : [];
   });
   const storedCategories = categories.filter(([key])=>!salesWindowColumns.has(key));
   const salesCategories = categories.filter(([key])=>salesWindowColumns.has(key));
+  const ranges = (f?.numeric ?? []).flatMap(filter => {
+    if (!isNumericFilterColumn(filter.field) || filter.field.startsWith("csv:") &&
+      !entries.some(entry=>Object.hasOwn(entry.row,filter.field))) return [];
+    const min = filter.min !== "" && Number.isFinite(Number(filter.min)) ? Number(filter.min) : null;
+    const max = filter.max !== "" && Number.isFinite(Number(filter.max)) ? Number(filter.max) : null;
+    return min !== null || max !== null ? [{field:filter.field,min,max}] : [];
+  });
   const search = asciiLower(f?.search.trim() ?? ""), freshAfter = Date.now()-staleHours*3600000;
   const result: {row: Item; raw: Item; originals: SyncCard["originals"]}[] = [];
   for (const entry of entries) {
     const {raw,market,row} = entry;
     if (selected && !selected.has(row.key)) continue;
     if (search && ![row.name,row.number,row.set,row.productId,row.skuId,...Object.values(raw)].some(value=>asciiLower(String(value ?? "")).includes(search))) continue;
-    if (storedCategories.some(([key,values])=>!values.has(row[key]))) continue;
+    if (storedCategories.some(([key,values,includeNone])=>!values.has(row[key]) && !(includeNone && isBlankCategory(row[key])))) continue;
     if (f?.freshness === "analyzed" && !row.analyzed ||
         f?.freshness === "unanalyzed" && row.analyzed ||
         f?.freshness === "missing" && entry.market.available !== false && entry.market.available !== 0 && row.fetchedAt != null ||
@@ -121,10 +128,10 @@ function selectRows(entries: Entry[], input: Input, staleHours: number) {
         f?.freshness === "outdated" && !(row.fetchedAt != null && row.fetchedAt < freshAfter || market.partial)) continue;
     const projected = rowWithSalesWindow(entry,from,to);
     if (salesCategories.some(([key,values])=>!values.has(projected[key]))) continue;
-    if (f?.numeric.some(filter => numericFields.has(filter.field) && (
-      filter.min !== "" && Number.isFinite(Number(filter.min)) && (projected[filter.field] == null || projected[filter.field] < Number(filter.min)) ||
-      filter.max !== "" && Number.isFinite(Number(filter.max)) && (projected[filter.field] == null || projected[filter.field] > Number(filter.max))
-    ))) continue;
+    if (ranges.some(({field,min,max}) => {
+      const value = numericFilterValue(projected[field]);
+      return value === null || min !== null && value < min || max !== null && value > max;
+    })) continue;
     result.push({row:projected,raw,originals:entry.originals});
   }
   const key = input.sort ?? "rowNo", direction = input.direction === "asc" ? 1 : -1;

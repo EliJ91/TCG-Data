@@ -5,6 +5,8 @@ import {
   inventoryPreferences,
   csvColumnKey,
   isCategoryValue,
+  isNumericFilterColumn,
+  isTagsColumn,
   legacyCategoryColumns,
   type CategoryValue,
   normalizePreferences,
@@ -396,6 +398,17 @@ export function expressions(p: Preferences) {
   result.historyTo = "COALESCE(json_extract(m.data,'$.historyTo'),(SELECT MAX(json_extract(h.value,'$.date')) FROM json_each(m.detail,'$.history') h))";
   return result;
 }
+// Match JavaScript trim for space-only CSV cells, including spreadsheet whitespace.
+const sqlWhitespace = "char(9,10,11,12,13,32,160,5760,8192,8193,8194,8195,8196,8197,8198,8199,8200,8201,8202,8232,8233,8239,8287,12288,65279)";
+
+function csvNumberExpression(expression: string) {
+  const value = "TRIM(REPLACE(REPLACE(CAST("+expression+" AS TEXT),'$',''),',',''),"+sqlWhitespace+")";
+  return "(SELECT CASE WHEN magnitude GLOB '*[0-9]*' AND magnitude NOT GLOB '*[^0-9.]*' " +
+    "AND magnitude NOT GLOB '*.*.*' AND ABS(CAST(number AS REAL)) <= 1.7976931348623157e308 " +
+    "THEN CAST(number AS REAL) END FROM (SELECT number, CASE WHEN SUBSTR(number,1,1) IN ('+','-') " +
+    "THEN SUBSTR(number,2) ELSE number END AS magnitude FROM (SELECT "+value+" AS number)))";
+}
+
 export type QueryInput = {
   filters?: Filters;
   sort?: string;
@@ -436,25 +449,24 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
   for (const [key, list] of Object.entries(f?.categories ?? {})) {
     if (!Object.hasOwn(e,key) || key === "rowNo" || !Array.isArray(list)) continue;
     const choices = list.filter(isCategoryValue);
-    if (!choices.length) continue;
-    where.push(e[key] + " IN (SELECT value FROM json_each(?))");
-    values.push(JSON.stringify(choices));
+    const clauses: string[] = [];
+    if (choices.length) {
+      clauses.push(e[key] + " IN (SELECT value FROM json_each(?))");
+      values.push(JSON.stringify(choices));
+    }
+    if (isTagsColumn(key) && list.includes(""))
+      clauses.push("COALESCE(TRIM(" + e[key] + "," + sqlWhitespace + "),'')=''");
+    if (clauses.length) where.push("(" + clauses.join(" OR ") + ")");
   }
   for (const filter of f?.numeric ?? []) {
-    if (
-      !columns.some(
-        (column) =>
-          column.key === filter.field &&
-          ["number", "money", "percent", "score"].includes(column.kind),
-      )
-    )
-      continue;
+    if (!Object.hasOwn(e,filter.field) || !isNumericFilterColumn(filter.field)) continue;
+    const expression = filter.field.startsWith("csv:") ? csvNumberExpression(e[filter.field]) : e[filter.field];
     if (filter.min !== "" && Number.isFinite(Number(filter.min))) {
-      where.push(e[filter.field] + ">=?");
+      where.push(expression + ">=?");
       values.push(Number(filter.min));
     }
     if (filter.max !== "" && Number.isFinite(Number(filter.max))) {
-      where.push(e[filter.field] + "<=?");
+      where.push(expression + "<=?");
       values.push(Number(filter.max));
     }
   }

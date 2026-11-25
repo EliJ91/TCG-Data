@@ -14,6 +14,26 @@ export type CardInfo = {
 export type ImportRow = { info: CardInfo; raw: Record<string, string> };
 export type NumericFilter = { field: string; min: string; max: string };
 export type CategoryValue = string | number;
+export function isTagsColumn(key: string) {
+  return key.startsWith("csv:") && key.slice(4).trim().toLowerCase() === "tags";
+}
+export function isBlankCategory(value: unknown) {
+  return value == null || typeof value === "string" && value.trim() === "";
+}
+export function isNumericFilterColumn(key: string) {
+  if (key === "unitsSold" || key === "quantity") return true;
+  if (!key.startsWith("csv:")) return false;
+  const header = normalizeLabel(key.slice(4));
+  return header.includes("price") || header.includes("quantity") || header === "qty" || header === "stock" || header === "unitssold";
+}
+export function numericFilterValue(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : null;
+  if (typeof value !== "string") return null;
+  const text = value.replace(/[$,]/g, "").trim();
+  if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(text)) return null;
+  const number = Number(text);
+  return Number.isFinite(number) ? number : null;
+}
 export const legacyCategoryColumns = ["set", "condition", "printing", "language", "rarity"] as const;
 export function isCategoryValue(value: unknown): value is CategoryValue {
   return typeof value === "string" ? value.trim().length > 0 : typeof value === "number" && Number.isFinite(value);
@@ -208,5 +228,5 @@ export const normalizeLabel = (value: string) =>
   value.toLowerCase().replace(/[^a-z0-9]/g, "");
 
 export function normalizeFilters(value: Partial<Filters> = {}): Filters {
-  return {...emptyFilters, ...value, limit: 0, dateField: "salesDate", numeric: Array.isArray(value.numeric) ? value.numeric.filter(filter => filter.field === "unitsSold") : [], categories: value.categories ?? {}};
+  return {...emptyFilters, ...value, limit: 0, dateField: "salesDate", numeric: Array.isArray(value.numeric) ? value.numeric.filter(filter => isNumericFilterColumn(filter.field)) : [], categories: value.categories ?? {}};
 }

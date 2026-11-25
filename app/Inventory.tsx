@@ -24,7 +24,10 @@ import {
 import {
   inventoryColumns,
   columns as standardColumns,
+  isNumericFilterColumn,
+  isTagsColumn,
   type CategoryValue,
+  type NumericFilter,
   type Column,
   marketColumns,
   normalizeFilters,
@@ -164,16 +167,20 @@ function CategoryFilter({
   const [search, setSearch] = useState("");
   const [limit, setLimit] = useState(100);
   const options = useMemo(() => {
-    const groups = new Map<string, CategoryValue[]>();
+    const tags = isTagsColumn(column.key);
+    const groups = new Map<string, {label: string; values: CategoryValue[]}>();
+    if (tags) groups.set("untagged",{label:"None",values:[""]});
     for (const value of new Set([...values, ...chosen])) {
-      const label = formatValue(value,column.kind);
-      const group = groups.get(label);
-      if (group) group.push(value);
-      else groups.set(label,[value]);
+      if (tags && value === "") continue;
+      const formatted = formatValue(value,column.kind);
+      const key = "value:"+formatted;
+      const group = groups.get(key);
+      if (group) group.values.push(value);
+      else groups.set(key,{label:tags && formatted === "None" ? "None (tag)" : formatted,values:[value]});
     }
     return [...groups];
-  }, [values, chosen, column.kind]);
-  const matching = options.filter(([label]) => label.toLowerCase().includes(search.toLowerCase()));
+  }, [values, chosen, column.key, column.kind]);
+  const matching = options.filter(([,option]) => option.label.toLowerCase().includes(search.toLowerCase()));
   const selection = new Set(chosen);
   return (
     <fieldset className="category">
@@ -187,8 +194,8 @@ function CategoryFilter({
         />
       )}
       <div>
-        {matching.slice(0,limit).map(([label,group]) => (
-          <label key={label}>
+        {matching.slice(0,limit).map(([key,{label,values:group}]) => (
+          <label key={key}>
             <input
               type="checkbox"
               checked={group.some(value=>selection.has(value))}
@@ -211,6 +218,36 @@ function CategoryFilter({
           <span className="muted small">{options.length ? "No matching values" : "No values"}</span>
         )}
       </div>
+    </fieldset>
+  );
+}
+function NumericRangeFilter({
+  column,
+  ranges,
+  onChange,
+}: {
+  column: Column;
+  ranges: [number, NumericFilter][];
+  onChange: (index:number, range:NumericFilter) => void;
+}) {
+  const fields: [number, NumericFilter][] = ranges.length ? ranges : [[-1,{field:column.key,min:"",max:""}]];
+  return (
+    <fieldset className="category">
+      <legend>{column.label}</legend>
+      {fields.map(([index,range], position) => (
+        <section className="range-fields" key={position}>
+          <label>
+            Min
+            <input aria-label={column.label+" minimum"} type="number" step="any" value={range.min}
+              onChange={event=>onChange(index,{...range,min:event.target.value})}/>
+          </label>
+          <label>
+            Max
+            <input aria-label={column.label+" maximum"} type="number" step="any" value={range.max}
+              onChange={event=>onChange(index,{...range,max:event.target.value})}/>
+          </label>
+        </section>
+      ))}
     </fieldset>
   );
 }
@@ -333,16 +370,21 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const visible = settings.visibleColumns
     .map((key) => columns.find((column) => column.key === key)!)
     .filter(Boolean);
+  const activeFilterColumns = new Set([
+    ...Object.entries(filters.categories).filter(([,values])=>values.length).map(([key])=>key),
+    ...filters.numeric.map(filter=>filter.field),
+  ]);
   const filterColumns = [
     ...visible,
     // Keep a selected filter removable when its column is hidden or comes from a saved view.
-    ...Object.entries(filters.categories).flatMap(([key, values]) => {
-      if (!values.length || visible.some(column=>column.key===key)) return [];
+    ...[...activeFilterColumns].flatMap(key => {
+      if (visible.some(column=>column.key===key)) return [];
       const column = columns.find(column=>column.key===key) ?? standardColumns.find(column=>column.key===key);
       return column ? [{...column,label:column.label+" (hidden)"}] : [];
     }),
   ];
-  const facetKeys = JSON.stringify(filterColumns.map(column=>column.key));
+  const facetKeys = JSON.stringify(filterColumns.filter(column=>
+    !isNumericFilterColumn(column.key) || filters.categories[column.key]?.length).map(column=>column.key));
   const localFacets = useMemo(() => advanced && localEntries
     ? inventoryFacets(localEntries, JSON.parse(facetKeys), filters.dateFrom, filters.dateTo)
     : {}, [advanced, localEntries, facetKeys, filters.dateFrom, filters.dateTo]);
@@ -372,6 +414,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setPage(1);
     setSelected(new Set());
     setView("custom");
+  };
+  const changeNumericRange = (index:number, range:NumericFilter) => {
+    const numeric = [...filters.numeric];
+    if (index < 0) numeric.push(range);
+    else if (range.min === "" && range.max === "") numeric.splice(index,1);
+    else numeric[index] = range;
+    changeFilters({...filters,numeric});
   };
   const persistSettings = (patch: Partial<Preferences>) => {
     const job = settingsSaveQueue.current.catch(() => {}).then(() =>
@@ -1124,116 +1173,28 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           {advanced && (
             <section className="filter-panel" aria-label="Advanced filters">
               <div className="filter-categories">
-                {filterColumns.map(column => (
-                  <CategoryFilter
-                    key={column.key}
-                    column={column}
-                    values={facets[column.key] ?? []}
-                    chosen={filters.categories[column.key] ?? []}
-                    onChange={(values) =>
-                      changeFilters({
-                        ...filters,
-                        categories: {
-                          ...filters.categories,
-                          [column.key]: values,
-                        },
-                      })
-                    }
-                  />
-                ))}
-              </div>
-              <div className="numeric-filters">
-                {filters.numeric.map((filter, index) => (
-                  <div className="numeric-filter" key={index}>
-                    <select
-                      aria-label="Numeric filter column"
-                      value={filter.field}
-                      onChange={(event) =>
-                        changeFilters({
-                          ...filters,
-                          numeric: filters.numeric.map((item, i) =>
-                            i === index
-                              ? { ...item, field: event.target.value }
-                              : item,
-                          ),
-                        })
-                      }
-                    >
-                      {columns
-                        .filter((column) =>
-                          ["money", "number", "percent", "score"].includes(
-                            column.kind,
-                          ),
-                        )
-                        .map((column) => (
-                          <option key={column.key} value={column.key}>
-                            {column.label}
-                          </option>
-                        ))}
-                    </select>
-                    <input
-                      aria-label="Minimum"
-                      placeholder="Min"
-                      type="number"
-                      value={filter.min}
-                      onChange={(event) =>
-                        changeFilters({
-                          ...filters,
-                          numeric: filters.numeric.map((item, i) =>
-                            i === index
-                              ? { ...item, min: event.target.value }
-                              : item,
-                          ),
-                        })
-                      }
+                {filterColumns.map(column => {
+                  const chosen = filters.categories[column.key] ?? [];
+                  const numeric = isNumericFilterColumn(column.key);
+                  const exact = !numeric || chosen.length > 0 ? (
+                    <CategoryFilter
+                      column={numeric ? {...column,label:column.label+" (exact values)"} : column}
+                      values={facets[column.key] ?? []}
+                      chosen={chosen}
+                      onChange={values=>changeFilters({
+                        ...filters,categories:{...filters.categories,[column.key]:values},
+                      })}
                     />
-                    <span>to</span>
-                    <input
-                      aria-label="Maximum"
-                      placeholder="Max"
-                      type="number"
-                      value={filter.max}
-                      onChange={(event) =>
-                        changeFilters({
-                          ...filters,
-                          numeric: filters.numeric.map((item, i) =>
-                            i === index
-                              ? { ...item, max: event.target.value }
-                              : item,
-                          ),
-                        })
-                      }
-                    />
-                    <button
-                      className="icon-button"
-                      aria-label="Remove numeric filter"
-                      onClick={() =>
-                        changeFilters({
-                          ...filters,
-                          numeric: filters.numeric.filter(
-                            (_, i) => i !== index,
-                          ),
-                        })
-                      }
-                    >
-                      <X size={16} />
-                    </button>
-                  </div>
-                ))}
-                <button
-                  className="text-button"
-                  onClick={() =>
-                    changeFilters({
-                      ...filters,
-                      numeric: [
-                        ...filters.numeric,
-                        { field: "unitsSold", min: "", max: "" },
-                      ],
-                    })
-                  }
-                >
-                  + Add a numeric filter
-                </button>
+                  ) : null;
+                  return numeric ? (
+                    <div className="numeric-column-filters" key={column.key}>
+                      <NumericRangeFilter column={column}
+                        ranges={filters.numeric.flatMap((filter,index)=>filter.field===column.key ? [[index,filter]] : [])}
+                        onChange={changeNumericRange}/>
+                      {exact}
+                    </div>
+                  ) : <div className="category-column-filter" key={column.key}>{exact}</div>;
+                })}
               </div>
               <div className="filter-bottom">
                 <label>
@@ -1256,6 +1217,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   </select>
                 </label>
                 <div className="filter-save">
+                  <button className="button" onClick={()=>setAdvanced(false)}>Close</button>
                   <button
                     className="button"
                     onClick={() => {
