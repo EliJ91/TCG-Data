@@ -1172,10 +1172,25 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             </div>
           )}
           {hasInventory && <section className="sales-date-filter" aria-label="Sales date range">
-            <strong>Sales dates</strong>
-            <label>From<input aria-label="Sales from" type="date" max={filters.dateTo || undefined} value={filters.dateFrom} onChange={event => changeFilters({...filters, dateFrom: event.target.value})}/></label>
-            <label>To<input aria-label="Sales to" type="date" min={filters.dateFrom || undefined} value={filters.dateTo} onChange={event => changeFilters({...filters, dateTo: event.target.value})}/></label>
-            <button className="button small-button" disabled={!filters.dateFrom && !filters.dateTo} onClick={() => changeFilters({...filters,dateFrom:"",dateTo:""})}>All dates</button>
+            <div className="sales-date-controls">
+              <strong>Sales dates</strong>
+              <label>
+                From
+                <input aria-label="Sales from" type="date" max={filters.dateTo || undefined}
+                  value={filters.dateFrom} onChange={event => changeFilters({...filters, dateFrom: event.target.value})}/>
+              </label>
+              <label>
+                To
+                <input aria-label="Sales to" type="date" min={filters.dateFrom || undefined}
+                  value={filters.dateTo} onChange={event => changeFilters({...filters, dateTo: event.target.value})}/>
+              </label>
+              <button className="button small-button" disabled={!filters.dateFrom && !filters.dateTo}
+                onClick={() => changeFilters({...filters,dateFrom:"",dateTo:""})}>All dates</button>
+            </div>
+            <div className="sales-date-total" aria-live="polite">
+              <span>Total Items</span>
+              <strong>{result.matches.toLocaleString()}</strong>
+            </div>
             <p className="small muted">{meta?.historyFrom != null && meta?.historyTo != null ? "Saved history: " + dateInput(meta.historyFrom) + " to " + dateInput(meta.historyTo) + ". " : "Pull sales history to load the available dates. "}Filters use saved quantities only. Weekly totals are selected by their reported date; exact daily counts are unavailable.</p>
           </section>}
           {advanced && (
