@@ -1,0 +1,2382 @@
+"use client";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import dynamic from "next/dynamic";
+import {
+  Layers3,
+  Upload,
+  Download,
+  Search,
+  Settings2,
+  SlidersHorizontal,
+  Columns3,
+  RefreshCw,
+  X,
+  ChevronDown,
+  ChevronUp,
+  FileSpreadsheet,
+  GripVertical,
+  Check,
+  AlertCircle,
+  Clock3,
+  LoaderCircle,
+  ExternalLink,
+} from "lucide-react";
+import {
+  columns,
+  defaults,
+  emptyFilters,
+  formatValue,
+  type Preferences,
+  type Filters,
+  type ImportRow,
+} from "../lib/domain";
+import { importFields, type Mapping } from "../lib/csv";
+import ImportWorker from "../lib/import.worker?worker";
+
+const HistoryChart = dynamic(() => import("./HistoryChart"), { ssr: false });
+type RecordValue = Record<string, any>;
+type Metadata = {
+  filename: string | null;
+  importedAt: number | null;
+  updatedAt: number | null;
+  settings: Preferences;
+  connected: boolean;
+  serverManagedKey: boolean;
+  usage: RecordValue;
+  importing: string | null;
+  uniqueCards: number;
+  totalCards: number;
+  inventoryValue: number | null;
+  refresh: RecordValue | null;
+};
+type Result = {
+  rows: RecordValue[];
+  page: number;
+  pageSize: number;
+  matches: number;
+  units: number;
+  value: number | null;
+  priced: number;
+  lastRefreshed: number | null;
+};
+const initialResult: Result = {
+  rows: [],
+  page: 1,
+  pageSize: 50,
+  matches: 0,
+  units: 0,
+  value: null,
+  priced: 0,
+  lastRefreshed: null,
+};
+async function api<T = any>(
+  path: string,
+  body?: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  const response = await fetch("/api/" + path, {
+    method: body === undefined ? "GET" : "POST",
+    headers:
+      body === undefined ? undefined : { "Content-Type": "application/json" },
+    body: body === undefined ? undefined : JSON.stringify(body),
+    signal,
+    cache: "no-store",
+  });
+  const result = (await response.json()) as RecordValue;
+  if (!response.ok)
+    throw new Error(result.error ?? "The request could not be completed.");
+  return result as T;
+}
+function Modal({
+  title,
+  children,
+  onClose,
+  wide = false,
+  error,
+}: {
+  title: string;
+  children: ReactNode;
+  onClose: () => void;
+  wide?: boolean;
+  error?: string;
+}) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    ref.current?.showModal();
+    return () => ref.current?.close();
+  }, []);
+  return (
+    <dialog
+      ref={ref}
+      className={wide ? "modal wide" : "modal"}
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+      onClick={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <div className="modal-heading">
+        <h2>{title}</h2>
+        <button
+          className="icon-button"
+          aria-label="Close dialog"
+          onClick={onClose}
+        >
+          <X size={20} />
+        </button>
+      </div>
+      {error && (
+        <p className="modal-error" role="alert">
+          {error}
+        </p>
+      )}
+      {children}
+    </dialog>
+  );
+}
+function CategoryFilter({
+  name,
+  values,
+  chosen,
+  onChange,
+}: {
+  name: string;
+  values: string[];
+  chosen: string[];
+  onChange: (values: string[]) => void;
+}) {
+  const [search, setSearch] = useState("");
+  return (
+    <fieldset className="category">
+      <legend>{name}</legend>
+      {values.length > 8 && (
+        <input
+          placeholder={"Find " + name.toLowerCase()}
+          value={search}
+          onChange={(event) => setSearch(event.target.value)}
+        />
+      )}
+      <div>
+        {values
+          .filter((value) => value.toLowerCase().includes(search.toLowerCase()))
+          .map((value) => (
+            <label key={value}>
+              <input
+                type="checkbox"
+                checked={chosen.includes(value)}
+                onChange={(event) =>
+                  onChange(
+                    event.target.checked
+                      ? [...chosen, value]
+                      : chosen.filter((item) => item !== value),
+                  )
+                }
+              />
+              <span>{value}</span>
+            </label>
+          ))}
+        {!values.length && (
+          <span className="muted small">No values imported</span>
+        )}
+      </div>
+    </fieldset>
+  );
+}
+function runImportWorker(
+  text: string,
+  operation: string,
+  mapping?: Mapping,
+): Promise<any> {
+  return new Promise((resolve, reject) => {
+    const worker = new ImportWorker();
+    worker.onmessage = (event) => {
+      worker.terminate();
+      if (event.data.error) reject(new Error(event.data.error));
+      else resolve(event.data);
+    };
+    worker.onerror = () => {
+      worker.terminate();
+      reject(
+        new Error(
+          "The CSV parser could not start. Reload the page and try again.",
+        ),
+      );
+    };
+    worker.postMessage({ text, operation, mapping });
+  });
+}
+const quickViews = [
+  ["all", "All inventory"],
+  ["top50", "Recommended top 50"],
+  ["top100", "Recommended top 100"],
+  ["fastest", "Fastest selling"],
+  ["demand", "Highest demand"],
+  ["competition", "Lowest competition"],
+  ["value", "Highest value"],
+  ["net", "Highest net proceeds"],
+  ["increasing", "Increasing demand"],
+  ["decreasing", "Decreasing demand"],
+  ["slow", "Slow-moving inventory"],
+  ["noSales", "No reported recent sales"],
+  ["missing", "Missing market data"],
+  ["outdated", "Outdated market data"],
+];
+const dateLabel = (value: number | null | undefined) =>
+  value
+    ? new Date(value).toLocaleString(undefined, {
+        month: "short",
+        day: "numeric",
+        year: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      })
+    : "Never";
+
+export default function Inventory() {
+  const [meta, setMeta] = useState<Metadata | null>(null),
+    [result, setResult] = useState<Result>(initialResult);
+  const [filters, setFilters] = useState<Filters>(emptyFilters),
+    [sort, setSort] = useState("priority"),
+    [direction, setDirection] = useState("desc");
+  const [page, setPage] = useState(1),
+    [pageSize, setPageSize] = useState(50),
+    [loading, setLoading] = useState(true),
+    [error, setError] = useState(""),
+    [notice, setNotice] = useState("");
+  const [facets, setFacets] = useState<Record<string, string[]>>({}),
+    [selected, setSelected] = useState<Set<string>>(new Set());
+  const [advanced, setAdvanced] = useState(false),
+    [view, setView] = useState("all"),
+    [modal, setModal] = useState<
+      "settings" | "columns" | "refresh" | "export" | "preset" | null
+    >(null);
+  const [settings, setSettings] = useState<Preferences>(defaults),
+    [keyDraft, setKeyDraft] = useState(""),
+    [saving, setSaving] = useState(false);
+  const [saveName, setSaveName] = useState(""),
+    [dragColumn, setDragColumn] = useState<string | null>(null);
+  const [card, setCard] = useState<RecordValue | null>(null),
+    [cardLoading, setCardLoading] = useState(false),
+    [historyType, setHistoryType] = useState("market");
+  const [file, setFile] = useState<{
+    name: string;
+    text: string;
+    headers: string[];
+    mapping: Mapping;
+    count: number;
+    preview: string[][];
+    mode: string;
+  } | null>(null);
+  const [fileBusy, setFileBusy] = useState(false),
+    [importProgress, setImportProgress] = useState(0),
+    [importId, setImportId] = useState<string | null>(null),
+    [replaceConfirmed, setReplaceConfirmed] = useState(false);
+  const [scope, setScope] = useState("filtered"),
+    [onlyStale, setOnlyStale] = useState(true),
+    [plan, setPlan] = useState<RecordValue | null>(null),
+    [planBusy, setPlanBusy] = useState(false);
+  const [refresh, setRefresh] = useState<RecordValue | null>(null),
+    [refreshRunning, setRefreshRunning] = useState(false),
+    [refreshErrors, setRefreshErrors] = useState<string[]>([]);
+  const [exportScope, setExportScope] = useState("filtered"),
+    [exportAnalysis, setExportAnalysis] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null),
+    importMode = useRef("upload"),
+    refreshCancelled = useRef(false),
+    uploadAbort = useRef<AbortController | null>(null),
+    lastAutomatic = useRef(Date.now());
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
+    [search, setSearch] = useState("");
+  const latest = useRef({ filters, sort, direction, meta });
+  latest.current = { filters, sort, direction, meta };
+  const hasInventory = !!meta?.filename;
+  const hasFilters =
+    !!filters.search ||
+    filters.numeric.length > 0 ||
+    Object.values(filters.categories).some((values) => values.length) ||
+    filters.freshness !== "all" ||
+    !!filters.dateFrom ||
+    !!filters.dateTo ||
+    filters.limit > 0;
+  const visible = settings.visibleColumns
+    .map((key) => columns.find((column) => column.key === key)!)
+    .filter(Boolean);
+  const query = { filters, sort, direction, page, pageSize };
+  const scopeQuery = (choice: string) => ({
+    filters: choice === "all" || choice === "selected" ? emptyFilters : filters,
+    sort,
+    direction,
+    ...(choice === "selected" ? { selected: [...selected] } : {}),
+  });
+  const showError = (problem: unknown) =>
+    setError(problem instanceof Error ? problem.message : String(problem));
+  const changeFilters = (next: Filters) => {
+    setFilters(next);
+    setPage(1);
+    setSelected(new Set());
+    setView("custom");
+  };
+  const loadMetadata = async () => {
+    const data = await api<Metadata>("state");
+    setMeta(data);
+    setSettings(data.settings);
+    setFacets(await api("facets"));
+    if (data.refresh?.status === "running") setRefresh(data.refresh);
+    return data;
+  };
+  useEffect(() => {
+    let active = true;
+    void loadMetadata()
+      .then(() => {
+        if (!active) return;
+        try {
+          const saved = JSON.parse(
+            localStorage.getItem("sortswift-view") ?? "null",
+          );
+          if (saved) {
+            setFilters({ ...emptyFilters, ...saved.filters });
+            setSearch(saved.filters?.search ?? "");
+            setSort(saved.sort ?? "priority");
+            setDirection(saved.direction ?? "desc");
+          }
+        } catch {}
+      })
+      .catch(showError)
+      .finally(() => {
+        if (active) setLoading(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+  useEffect(() => {
+    if (!meta) return;
+    const controller = new AbortController();
+    setLoading(true);
+    void api<Result>(
+      "cards?q=" + encodeURIComponent(JSON.stringify(query)),
+      undefined,
+      controller.signal,
+    )
+      .then(setResult)
+      .catch((problem) => {
+        if (problem.name !== "AbortError") showError(problem);
+      })
+      .finally(() => {
+        if (!controller.signal.aborted) setLoading(false);
+      });
+    localStorage.setItem(
+      "sortswift-view",
+      JSON.stringify({ filters, sort, direction }),
+    );
+    return () => controller.abort();
+  }, [meta, filters, sort, direction, page, pageSize]);
+  useEffect(() => {
+    if (searchTimer.current) clearTimeout(searchTimer.current);
+    searchTimer.current = setTimeout(() => {
+      if (search !== latest.current.filters.search) {
+        setFilters((current) => ({ ...current, search }));
+        setPage(1);
+      }
+    }, 180);
+    return () => {
+      if (searchTimer.current) clearTimeout(searchTimer.current);
+    };
+  }, [search]);
+  const updateSettings = async (next: Preferences, extra?: RecordValue) => {
+    const data = await api<Metadata>("preferences", {
+      settings: next,
+      ...extra,
+    });
+    setMeta(data);
+    setSettings(data.settings);
+    return data;
+  };
+  const chooseView = (value: string) => {
+    setView(value);
+    setPage(1);
+    setSelected(new Set());
+    setSearch("");
+    const saved = value.startsWith("saved:")
+      ? settings.presets[Number(value.slice(6))]
+      : null;
+    if (saved) {
+      setFilters(saved.filters);
+      setSearch(saved.filters.search);
+      setSort(saved.sort);
+      setDirection(saved.direction);
+      return;
+    }
+    const next: Filters = structuredClone(emptyFilters);
+    let field = "priority",
+      dir = "desc";
+    if (value === "top50") next.limit = 50;
+    if (value === "top100") next.limit = 100;
+    if (value === "top50" || value === "top100")
+      next.numeric = [{ field: "netProceeds", min: "0.01", max: "" }];
+    if (value === "fastest") field = "dailySales";
+    if (value === "demand") field = "demandScore";
+    if (value === "competition") {
+      field = "sampleSellers";
+      dir = "asc";
+    }
+    if (value === "value") field = "inventoryValue";
+    if (value === "net") field = "netProceeds";
+    if (value === "increasing" || value === "decreasing") {
+      field = "salesTrend";
+      next.numeric = [
+        {
+          field,
+          min: value === "increasing" ? "0.01" : "",
+          max: value === "decreasing" ? "-0.01" : "",
+        },
+      ];
+    }
+    if (value === "slow") {
+      field = "dailySales";
+      dir = "asc";
+      next.numeric = [{ field, min: "0", max: "0.25" }];
+    }
+    if (value === "noSales") {
+      field = "units14";
+      next.numeric = [{ field, min: "0", max: "0" }];
+    }
+    if (value === "missing" || value === "outdated") next.freshness = value;
+    setFilters(next);
+    setSort(field);
+    setDirection(dir);
+  };
+  const readFile = async (input: File, mode: string) => {
+    setError("");
+    setFileBusy(true);
+    setReplaceConfirmed(false);
+    setImportProgress(0);
+    try {
+      const text = await input.text(),
+        analysis = await runImportWorker(text, "analyze");
+      setFile({ name: input.name, text, mode, ...analysis });
+    } catch (problem) {
+      showError(problem);
+    } finally {
+      setFileBusy(false);
+      if (fileInput.current) fileInput.current.value = "";
+    }
+  };
+  const openFile = (mode: string) => {
+    importMode.current = mode;
+    fileInput.current?.click();
+  };
+  const upload = async () => {
+    if (!file) return;
+    setFileBusy(true);
+    setError("");
+    const controller = new AbortController();
+    uploadAbort.current = controller;
+    let id: string | null = null;
+    try {
+      const prepared: { headers: string[]; rows: ImportRow[] } =
+        await runImportWorker(file.text, "prepare", file.mapping);
+      const started = await api<{ id: string }>(
+        "imports/start",
+        {
+          mode: file.mode,
+          filename: file.name,
+          headers: prepared.headers,
+          count: prepared.rows.length,
+        },
+        controller.signal,
+      );
+      id = started.id;
+      setImportId(id);
+      for (let start = 0; start < prepared.rows.length; ) {
+        let end = Math.min(start + 500, prepared.rows.length);
+        while (
+          end - start > 1 &&
+          JSON.stringify(prepared.rows.slice(start, end)).length > 650000
+        )
+          end = start + Math.floor((end - start) / 2);
+        await api(
+          "imports/chunk",
+          { id, start, rows: prepared.rows.slice(start, end) },
+          controller.signal,
+        );
+        start = end;
+        setImportProgress(Math.round((start / prepared.rows.length) * 95));
+      }
+      const data = await api<Metadata>(
+        "imports/commit",
+        { id },
+        controller.signal,
+      );
+      setMeta(data);
+      setSettings(data.settings);
+      setFacets(await api("facets"));
+      setFile(null);
+      setImportId(null);
+      setSelected(new Set());
+      setFilters(emptyFilters);
+      setSearch("");
+      setPage(1);
+      setNotice(
+        "Inventory saved. Market data will refresh only when you request it.",
+      );
+      setImportProgress(100);
+    } catch (problem) {
+      if (id) await api("imports/cancel", { id }).catch(() => {});
+      if ((problem as Error).name !== "AbortError") showError(problem);
+    } finally {
+      setFileBusy(false);
+      setImportId(null);
+      uploadAbort.current = null;
+    }
+  };
+  const cancelUpload = () => {
+    uploadAbort.current?.abort();
+    if (importId) void api("imports/cancel", { id: importId }).catch(showError);
+    setFile(null);
+    setImportId(null);
+  };
+  useEffect(() => {
+    if (modal !== "refresh") return;
+    let active = true;
+    setPlanBusy(true);
+    void api("market/plan", { ...scopeQuery(scope), onlyStale })
+      .then((value) => {
+        if (active) setPlan(value);
+      })
+      .catch(showError)
+      .finally(() => {
+        if (active) setPlanBusy(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [
+    modal,
+    scope,
+    onlyStale,
+    filters,
+    selected,
+    settings.refreshDetail,
+    settings.archivePages,
+  ]);
+  const runRefresh = async (choice = scope, stale = onlyStale) => {
+    setError("");
+    setRefreshErrors([]);
+    setRefreshRunning(true);
+    refreshCancelled.current = false;
+    setModal(null);
+    try {
+      const started = await api("market/start", {
+        ...scopeQuery(choice),
+        onlyStale: stale,
+      });
+      setRefresh({
+        ...started,
+        completed: 0,
+        failed: 0,
+        spent: 0,
+        status: "running",
+        detail: JSON.stringify({
+          requests: 0,
+          failedRequests: 0,
+          maximumRequests: started.maximumRequests,
+        }),
+      });
+      for (const key of started.keys) {
+        if (refreshCancelled.current) break;
+        const progress = await api("market/step", { id: started.id, key });
+        setRefresh(progress);
+        if (progress.error)
+          setRefreshErrors((current) => [...current, progress.error].slice(-5));
+        if (progress.status !== "running") break;
+      }
+      await loadMetadata();
+    } catch (problem) {
+      if (!refreshCancelled.current) showError(problem);
+    } finally {
+      setRefreshRunning(false);
+    }
+  };
+  const stopRefresh = async () => {
+    refreshCancelled.current = true;
+    if (refresh?.id) {
+      await api("market/cancel", { id: refresh.id });
+      setRefresh((current) =>
+        current ? { ...current, status: "cancelled" } : null,
+      );
+    }
+    setRefreshRunning(false);
+    setNotice(
+      "Refresh cancelled. Completed requests and your previous data are saved.",
+    );
+  };
+  useEffect(() => {
+    if (!settings.autoMinutes || !meta?.connected || !hasInventory) return;
+    const timer = setInterval(() => {
+      if (
+        document.hidden ||
+        refreshRunning ||
+        fileBusy ||
+        Date.now() - lastAutomatic.current < settings.autoMinutes * 60000
+      )
+        return;
+      lastAutomatic.current = Date.now();
+      void runRefresh("all", true);
+    }, 30000);
+    return () => clearInterval(timer);
+  }, [
+    settings.autoMinutes,
+    meta?.connected,
+    hasInventory,
+    refreshRunning,
+    fileBusy,
+  ]);
+  const exportFile = async () => {
+    setSaving(true);
+    setError("");
+    try {
+      const response = await fetch("/api/export", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ...scopeQuery(exportScope),
+          analysis: exportAnalysis,
+        }),
+      });
+      if (!response.ok)
+        throw new Error(
+          ((await response.json()) as RecordValue).error ??
+            "Could not export inventory.",
+        );
+      const blob = await response.blob(),
+        url = URL.createObjectURL(blob),
+        anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = exportAnalysis
+        ? "sortswift-market-analysis.csv"
+        : "tcgplayer-inventory.csv";
+      anchor.click();
+      setTimeout(() => URL.revokeObjectURL(url), 60000);
+      setModal(null);
+    } catch (problem) {
+      showError(problem);
+    } finally {
+      setSaving(false);
+    }
+  };
+  const openCard = async (row: RecordValue) => {
+    setCardLoading(true);
+    setCard({ card: row });
+    setHistoryType("market");
+    try {
+      setCard(await api("card?key=" + encodeURIComponent(row.key)));
+    } catch (problem) {
+      showError(problem);
+      setCard(null);
+    } finally {
+      setCardLoading(false);
+    }
+  };
+  const moveColumn = (key: string, offset: number) => {
+    const list = [...settings.visibleColumns],
+      index = list.indexOf(key),
+      target = index + offset;
+    if (target < 0 || target >= list.length) return;
+    [list[index], list[target]] = [list[target], list[index]];
+    setSettings({ ...settings, visibleColumns: list });
+  };
+  const activeRefresh = refreshRunning || refresh?.status === "running";
+  const progress = refresh?.total
+    ? Math.min(
+        100,
+        (Number(refresh.completed ?? 0) / Number(refresh.total)) * 100,
+      )
+    : 0;
+  const refreshDetail = refresh?.detail ? JSON.parse(refresh.detail) : {};
+  return (
+    <div className="app-shell">
+      <header className="topbar">
+        <a className="brand" href="/">
+          <span className="brand-icon">
+            <Layers3 size={22} />
+          </span>
+          <span className="wordmark">
+            SortSwift <span>Market</span>
+          </span>
+        </a>
+        <div className="topbar-actions">
+          <span className="connection">
+            <i className={meta?.connected ? "connected" : ""} />
+            {meta?.connected
+              ? "TCGAPIs connected"
+              : "Market data not connected"}
+          </span>
+          <button
+            className="button subtle"
+            onClick={() => {
+              setKeyDraft("");
+              setModal("settings");
+            }}
+          >
+            <Settings2 size={17} />
+            Settings
+          </button>
+        </div>
+      </header>
+      <main>
+        <div className="page-heading">
+          <div>
+            <h1>Inventory</h1>
+          </div>
+          {hasInventory && (
+            <div className="actions">
+              {hasInventory && (
+                <>
+                  <button
+                    className="button"
+                    disabled={fileBusy || activeRefresh}
+                    onClick={() => openFile("update")}
+                  >
+                    <Upload size={16} />
+                    Update CSV
+                  </button>
+                  <button
+                    className="button"
+                    disabled={fileBusy || activeRefresh}
+                    onClick={() => openFile("replace")}
+                  >
+                    Replace CSV
+                  </button>
+                </>
+              )}
+              <button
+                className="button primary"
+                disabled={!hasInventory || activeRefresh || fileBusy}
+                onClick={() => {
+                  setPlan(null);
+                  setModal("refresh");
+                }}
+              >
+                <RefreshCw size={16} />
+                Refresh market data
+              </button>
+            </div>
+          )}
+        </div>
+        {error && (
+          <div className="banner error" role="alert">
+            <AlertCircle size={18} />
+            <span>{error}</span>
+            <button
+              className="icon-button"
+              onClick={() => setError("")}
+              aria-label="Dismiss error"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+        {notice && (
+          <div className="banner notice" role="status">
+            <Check size={17} />
+            <span>{notice}</span>
+            <button
+              className="icon-button"
+              onClick={() => setNotice("")}
+              aria-label="Dismiss notification"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+        {meta?.importing && !fileBusy && (
+          <div className="banner error">
+            <AlertCircle size={18} />
+            <span>
+              An earlier CSV import is unfinished. Your saved inventory is
+              available.
+            </span>
+            <button
+              className="text-button"
+              onClick={() =>
+                void api("imports/cancel", { id: meta.importing })
+                  .then(loadMetadata)
+                  .catch(showError)
+              }
+            >
+              Discard unfinished import
+            </button>
+          </div>
+        )}
+        {hasInventory && (
+          <div className="inventory-meta">
+            <span>
+              <FileSpreadsheet size={16} />
+              <strong>{meta?.filename}</strong>
+            </span>
+            <span>
+              {Number(meta?.totalCards ?? 0).toLocaleString()} cards ·{" "}
+              {Number(meta?.uniqueCards ?? 0).toLocaleString()} unique
+            </span>
+            <span>Imported {dateLabel(meta?.importedAt)}</span>
+            <span>Updated {dateLabel(meta?.updatedAt)}</span>
+          </div>
+        )}
+        {refresh && (
+          <section
+            className="refresh-progress"
+            aria-label="Market refresh progress"
+          >
+            <div>
+              <strong>
+                {activeRefresh
+                  ? "Refreshing market data"
+                  : refresh.status === "cancelled"
+                    ? "Refresh cancelled"
+                    : "Market refresh finished"}
+              </strong>
+              <span className="muted">
+                {refresh.completed ?? 0} card lookups completed ·{" "}
+                {Math.max(0, (refresh.total ?? 0) - (refresh.completed ?? 0))}{" "}
+                remaining · {refresh.failed ?? 0} failed
+              </span>
+              {activeRefresh && (
+                <button
+                  className="button small-button"
+                  onClick={() => void stopRefresh().catch(showError)}
+                >
+                  Cancel refresh
+                </button>
+              )}
+              {!activeRefresh && (
+                <button
+                  className="icon-button"
+                  aria-label="Dismiss refresh summary"
+                  onClick={() => setRefresh(null)}
+                >
+                  <X size={17} />
+                </button>
+              )}
+            </div>
+            <progress max={100} value={progress} />
+            <p className="small muted">
+              {refreshDetail.requests ?? 0} API requests ·{" "}
+              {refreshDetail.failedRequests ?? 0} failed requests · up to{" "}
+              {activeRefresh
+                ? Math.max(
+                    0,
+                    (refreshDetail.maximumRequests ?? 0) -
+                      (refreshDetail.requests ?? 0),
+                  )
+                : 0}{" "}
+              requests remaining (estimate) ·{" "}
+              {Number(refresh.spent ?? 0).toLocaleString()}{" "}
+              {meta?.usage.unit ?? "credits"} used.{" "}
+              {meta?.usage.remaining !== null &&
+              meta?.usage.remaining !== undefined
+                ? Number(meta.usage.remaining).toLocaleString() + " remaining."
+                : ""}
+            </p>
+            {refreshErrors.length > 0 && (
+              <details>
+                <summary>Request issues</summary>
+                {refreshErrors.map((message, index) => (
+                  <p className="small" key={index}>
+                    {message}
+                  </p>
+                ))}
+              </details>
+            )}
+          </section>
+        )}
+        <section className="inventory-panel">
+          {hasInventory && (
+            <div className="table-toolbar">
+              <div className="search-field">
+                <Search size={17} />
+                <input
+                  aria-label="Search inventory"
+                  placeholder="Search cards, sets, numbers, or IDs…"
+                  value={search}
+                  onChange={(event) => setSearch(event.target.value)}
+                />
+                {search && (
+                  <button
+                    className="icon-button"
+                    aria-label="Clear search"
+                    onClick={() => setSearch("")}
+                  >
+                    <X size={15} />
+                  </button>
+                )}
+              </div>
+              <div className="toolbar-actions">
+                <select
+                  aria-label="Quick filter"
+                  value={view}
+                  onChange={(event) => chooseView(event.target.value)}
+                >
+                  <option value="custom" hidden>
+                    Custom view
+                  </option>
+                  {quickViews.map(([value, label]) => (
+                    <option key={value} value={value}>
+                      {label}
+                    </option>
+                  ))}
+                  {settings.presets.length > 0 && (
+                    <optgroup label="Saved views">
+                      {settings.presets.map((preset, index) => (
+                        <option key={index} value={"saved:" + index}>
+                          {preset.name}
+                        </option>
+                      ))}
+                    </optgroup>
+                  )}
+                </select>
+                <button
+                  className={advanced ? "button active" : "button"}
+                  aria-expanded={advanced}
+                  onClick={() => setAdvanced(!advanced)}
+                >
+                  <SlidersHorizontal size={16} />
+                  Filters
+                  {hasFilters && (
+                    <span className="filter-count">
+                      {filters.numeric.length +
+                        Object.values(filters.categories).filter(
+                          (values) => values.length,
+                        ).length +
+                        (filters.freshness !== "all" ? 1 : 0) +
+                        (filters.search ? 1 : 0)}
+                    </span>
+                  )}
+                </button>
+                <button
+                  className="button"
+                  aria-label="Table columns"
+                  onClick={() => setModal("columns")}
+                >
+                  <Columns3 size={16} />
+                  <span className="optional-label">Columns</span>
+                </button>
+                <button
+                  className="button"
+                  aria-label="Export inventory"
+                  disabled={!hasInventory}
+                  onClick={() => {
+                    setExportScope(selected.size ? "selected" : "filtered");
+                    setModal("export");
+                  }}
+                >
+                  <Download size={16} />
+                  <span className="optional-label">Export</span>
+                </button>
+              </div>
+            </div>
+          )}
+          {advanced && (
+            <section className="filter-panel" aria-label="Advanced filters">
+              <div className="filter-categories">
+                {["set", "condition", "printing", "language", "rarity"].map(
+                  (field) => (
+                    <CategoryFilter
+                      key={field}
+                      name={field[0].toUpperCase() + field.slice(1)}
+                      values={facets[field] ?? []}
+                      chosen={filters.categories[field] ?? []}
+                      onChange={(values) =>
+                        changeFilters({
+                          ...filters,
+                          categories: {
+                            ...filters.categories,
+                            [field]: values,
+                          },
+                        })
+                      }
+                    />
+                  ),
+                )}
+              </div>
+              <div className="numeric-filters">
+                {filters.numeric.map((filter, index) => (
+                  <div className="numeric-filter" key={index}>
+                    <select
+                      aria-label="Numeric filter column"
+                      value={filter.field}
+                      onChange={(event) =>
+                        changeFilters({
+                          ...filters,
+                          numeric: filters.numeric.map((item, i) =>
+                            i === index
+                              ? { ...item, field: event.target.value }
+                              : item,
+                          ),
+                        })
+                      }
+                    >
+                      {columns
+                        .filter((column) =>
+                          ["money", "number", "percent", "score"].includes(
+                            column.kind,
+                          ),
+                        )
+                        .map((column) => (
+                          <option key={column.key} value={column.key}>
+                            {column.label}
+                          </option>
+                        ))}
+                    </select>
+                    <input
+                      aria-label="Minimum"
+                      placeholder="Min"
+                      type="number"
+                      value={filter.min}
+                      onChange={(event) =>
+                        changeFilters({
+                          ...filters,
+                          numeric: filters.numeric.map((item, i) =>
+                            i === index
+                              ? { ...item, min: event.target.value }
+                              : item,
+                          ),
+                        })
+                      }
+                    />
+                    <span>to</span>
+                    <input
+                      aria-label="Maximum"
+                      placeholder="Max"
+                      type="number"
+                      value={filter.max}
+                      onChange={(event) =>
+                        changeFilters({
+                          ...filters,
+                          numeric: filters.numeric.map((item, i) =>
+                            i === index
+                              ? { ...item, max: event.target.value }
+                              : item,
+                          ),
+                        })
+                      }
+                    />
+                    <button
+                      className="icon-button"
+                      aria-label="Remove numeric filter"
+                      onClick={() =>
+                        changeFilters({
+                          ...filters,
+                          numeric: filters.numeric.filter(
+                            (_, i) => i !== index,
+                          ),
+                        })
+                      }
+                    >
+                      <X size={16} />
+                    </button>
+                  </div>
+                ))}
+                <button
+                  className="text-button"
+                  onClick={() =>
+                    changeFilters({
+                      ...filters,
+                      numeric: [
+                        ...filters.numeric,
+                        { field: "marketPrice", min: "", max: "" },
+                      ],
+                    })
+                  }
+                >
+                  + Add a numeric filter
+                </button>
+              </div>
+              <div className="filter-bottom">
+                <label>
+                  Market data
+                  <select
+                    value={filters.freshness}
+                    onChange={(event) =>
+                      changeFilters({
+                        ...filters,
+                        freshness: event.target.value,
+                      })
+                    }
+                  >
+                    <option value="all">Any availability</option>
+                    <option value="fresh">Fresh</option>
+                    <option value="missing">Missing</option>
+                    <option value="outdated">Outdated</option>
+                  </select>
+                </label>
+                <label>
+                  Date field
+                  <select
+                    value={filters.dateField}
+                    onChange={(event) =>
+                      changeFilters({
+                        ...filters,
+                        dateField: event.target.value,
+                      })
+                    }
+                  >
+                    <option value="fetchedAt">Market refreshed</option>
+                    <option value="lastSoldAt">Last verified sale</option>
+                  </select>
+                </label>
+                <label>
+                  From
+                  <input
+                    type="date"
+                    value={filters.dateFrom}
+                    onChange={(event) =>
+                      changeFilters({
+                        ...filters,
+                        dateFrom: event.target.value,
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  To
+                  <input
+                    type="date"
+                    value={filters.dateTo}
+                    onChange={(event) =>
+                      changeFilters({ ...filters, dateTo: event.target.value })
+                    }
+                  />
+                </label>
+                <div className="filter-save">
+                  <button
+                    className="button"
+                    onClick={() => {
+                      setSaveName("");
+                      setModal("preset");
+                    }}
+                  >
+                    Save view
+                  </button>
+                  <button
+                    className="text-button"
+                    onClick={() => chooseView("all")}
+                  >
+                    Reset filters
+                  </button>
+                </div>
+              </div>
+            </section>
+          )}
+          {selected.size > 0 && (
+            <div className="selection-bar">
+              <strong>{selected.size.toLocaleString()} selected</strong>
+              <button
+                className="text-button"
+                onClick={() => {
+                  setScope("selected");
+                  setModal("refresh");
+                }}
+              >
+                Refresh selected
+              </button>
+              <button
+                className="text-button"
+                onClick={() => {
+                  setExportScope("selected");
+                  setModal("export");
+                }}
+              >
+                Export selected
+              </button>
+              <button
+                className="text-button muted"
+                onClick={() => setSelected(new Set())}
+              >
+                Clear selection
+              </button>
+            </div>
+          )}
+          {hasInventory ? (
+            <>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th className="checkbox-cell">
+                        <input
+                          type="checkbox"
+                          aria-label="Select this page"
+                          checked={
+                            result.rows.length > 0 &&
+                            result.rows.every((row) => selected.has(row.key))
+                          }
+                          onChange={(event) => {
+                            const next = new Set(selected);
+                            for (const row of result.rows)
+                              if (event.target.checked) next.add(row.key);
+                              else next.delete(row.key);
+                            setSelected(next);
+                          }}
+                        />
+                      </th>
+                      {visible.map((column) => (
+                        <th
+                          key={column.key}
+                          aria-sort={
+                            sort === column.key
+                              ? direction === "asc"
+                                ? "ascending"
+                                : "descending"
+                              : "none"
+                          }
+                        >
+                          <button
+                            title={column.note ?? "Sort by " + column.label}
+                            onClick={() => {
+                              if (sort === column.key)
+                                setDirection(
+                                  direction === "asc" ? "desc" : "asc",
+                                );
+                              else {
+                                setSort(column.key);
+                                setDirection(
+                                  column.kind === "text" ? "asc" : "desc",
+                                );
+                              }
+                              setPage(1);
+                            }}
+                          >
+                            {column.label}
+                            {sort === column.key &&
+                              (direction === "asc" ? (
+                                <ChevronUp size={13} />
+                              ) : (
+                                <ChevronDown size={13} />
+                              ))}
+                          </button>
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.rows.map((row) => (
+                      <tr
+                        key={row.key}
+                        tabIndex={0}
+                        onClick={() => void openCard(row)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter") void openCard(row);
+                        }}
+                      >
+                        <td
+                          className="checkbox-cell"
+                          onClick={(event) => event.stopPropagation()}
+                        >
+                          <input
+                            type="checkbox"
+                            aria-label={"Select " + row.name}
+                            checked={selected.has(row.key)}
+                            onChange={(event) => {
+                              const next = new Set(selected);
+                              if (event.target.checked) next.add(row.key);
+                              else next.delete(row.key);
+                              setSelected(next);
+                            }}
+                          />
+                        </td>
+                        {visible.map((column) => (
+                          <td
+                            key={column.key}
+                            className={column.kind === "text" ? "" : "numeric"}
+                          >
+                            {column.key === "name" ? (
+                              <div className="card-name">
+                                <strong>{row.name}</strong>
+                                <span>
+                                  {row.number ? row.number + " · " : ""}
+                                  {row.language || "Language not specified"}
+                                </span>
+                              </div>
+                            ) : column.kind === "score" &&
+                              row[column.key] !== null ? (
+                              <span
+                                className={
+                                  "score " +
+                                  (row[column.key] >= 70
+                                    ? "strong"
+                                    : row[column.key] >= 40
+                                      ? "medium"
+                                      : "")
+                                }
+                              >
+                                {formatValue(row[column.key], column.kind)}
+                              </span>
+                            ) : (
+                              <span
+                                className={
+                                  row[column.key] === null ? "unavailable" : ""
+                                }
+                              >
+                                {column.key.startsWith("units") &&
+                                row[column.key] !== null
+                                  ? "≥"
+                                  : ""}
+                                {formatValue(row[column.key], column.kind)}
+                              </span>
+                            )}
+                          </td>
+                        ))}
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                {!result.rows.length && (
+                  <div className="no-results">
+                    <Search size={24} />
+                    <h3>No cards match this view</h3>
+                    <p>Adjust your search or filters to see more cards.</p>
+                    <button
+                      className="button"
+                      onClick={() => chooseView("all")}
+                    >
+                      Reset filters
+                    </button>
+                  </div>
+                )}
+              </div>
+              <div className="table-footer">
+                <div>
+                  <strong>{result.matches.toLocaleString()}</strong> matching
+                  cards<span>·</span>
+                  <strong>{formatValue(result.value, "money")}</strong> matching
+                  value{" "}
+                  <span className="muted">
+                    ({result.priced.toLocaleString()} priced)
+                  </span>
+                  {loading && <LoaderCircle size={15} className="spin" />}
+                </div>
+                <div className="pagination">
+                  <label>
+                    Rows
+                    <select
+                      aria-label="Rows per page"
+                      value={pageSize}
+                      onChange={(event) => {
+                        setPageSize(Number(event.target.value));
+                        setPage(1);
+                      }}
+                    >
+                      <option>25</option>
+                      <option>50</option>
+                      <option>100</option>
+                    </select>
+                  </label>
+                  <span>
+                    {page} / {Math.max(1, Math.ceil(result.matches / pageSize))}
+                  </span>
+                  <button
+                    className="button small-button"
+                    disabled={page <= 1}
+                    onClick={() => setPage(page - 1)}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    className="button small-button"
+                    disabled={page * pageSize >= result.matches}
+                    onClick={() => setPage(page + 1)}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </>
+          ) : (
+            <div
+              className="empty-state"
+              onDragOver={(event) => event.preventDefault()}
+              onDrop={(event) => {
+                event.preventDefault();
+                const dropped = event.dataTransfer.files[0];
+                if (dropped) void readFile(dropped, "upload");
+              }}
+            >
+              <div className="empty-symbol">
+                <FileSpreadsheet size={30} strokeWidth={1.5} />
+              </div>
+              <h2>Start with your inventory</h2>
+              <p>
+                Upload a SortSwift or TCGplayer CSV.
+                <br />
+                Your original data stays intact, and your inventory is saved for
+                your next visit.
+              </p>
+              <button
+                className="button primary"
+                disabled={fileBusy || !meta}
+                onClick={() => openFile("upload")}
+              >
+                {fileBusy ? (
+                  <LoaderCircle size={17} className="spin" />
+                ) : (
+                  <Upload size={17} />
+                )}
+                Upload CSV
+              </button>
+              <span className="small muted">or drop a CSV file here</span>
+              <div className="empty-note">
+                <Check size={15} />
+                <span>Importing a CSV uses no API credits.</span>
+              </div>
+            </div>
+          )}
+        </section>
+        <footer className="workspace-footer">
+          <span>
+            <Clock3 size={14} />
+            Market last refreshed {dateLabel(result.lastRefreshed)}
+          </span>
+          <span>
+            USD · N/A means unavailable ·{" "}
+            <a
+              href="https://tcgapis.com/documentation"
+              target="_blank"
+              rel="noreferrer"
+            >
+              TCGAPIs documentation <ExternalLink size={12} />
+            </a>
+          </span>
+        </footer>
+        <input
+          ref={fileInput}
+          type="file"
+          accept=".csv,text/csv"
+          hidden
+          onChange={(event) => {
+            const picked = event.target.files?.[0];
+            if (picked) void readFile(picked, importMode.current);
+          }}
+        />
+      </main>
+      {file && (
+        <Modal
+          error={error}
+          title={
+            file.mode === "replace"
+              ? "Replace inventory"
+              : file.mode === "update"
+                ? "Update inventory"
+                : "Import inventory"
+          }
+          onClose={cancelUpload}
+          wide
+        >
+          <div className="modal-body">
+            <div className="file-summary">
+              <FileSpreadsheet size={23} />
+              <div>
+                <strong>{file.name}</strong>
+                <p>
+                  {file.count.toLocaleString()} rows · {file.headers.length}{" "}
+                  columns
+                </p>
+              </div>
+            </div>
+            <p className="muted">
+              {file.mode === "update"
+                ? "Matching cards will be updated and new cards added. Cards absent from this CSV stay in inventory."
+                : "The complete file is validated before your saved inventory changes."}{" "}
+              Cached market data is kept separately.
+            </p>
+            <details
+              className="mapping-details"
+              open={
+                !file.mapping.name ||
+                !file.mapping.quantity ||
+                (!file.mapping.skuId && !file.mapping.productId)
+              }
+            >
+              <summary>Review column mapping</summary>
+              <p className="small muted">
+                TCGplayer Id is a SKU, not a product ID. Managed Inventory codes
+                are not marketplace SKUs.
+              </p>
+              <div className="mapping-grid">
+                {importFields.map(([key, label]) => (
+                  <label key={key}>
+                    {label}
+                    <select
+                      value={file.mapping[key] ?? ""}
+                      disabled={fileBusy}
+                      onChange={(event) =>
+                        setFile({
+                          ...file,
+                          mapping: {
+                            ...file.mapping,
+                            [key]: event.target.value,
+                          },
+                        })
+                      }
+                    >
+                      <option value="">Not provided</option>
+                      {file.headers.map((header) => (
+                        <option key={header}>{header}</option>
+                      ))}
+                    </select>
+                  </label>
+                ))}
+              </div>
+            </details>
+            <div className="import-preview">
+              <table>
+                <thead>
+                  <tr>
+                    {file.headers.map((header) => (
+                      <th key={header}>{header}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {file.preview.map((row, index) => (
+                    <tr key={index}>
+                      {row.map((value, i) => (
+                        <td key={i}>{value}</td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {file.mode === "replace" && (
+              <label className="check-label danger-text">
+                <input
+                  type="checkbox"
+                  checked={replaceConfirmed}
+                  onChange={(event) =>
+                    setReplaceConfirmed(event.target.checked)
+                  }
+                />
+                Replace all current inventory with this validated file.
+              </label>
+            )}
+            {fileBusy && (
+              <div className="import-progress">
+                <progress max={100} value={importProgress} />
+                <p className="small muted">
+                  {importProgress
+                    ? importProgress +
+                      "% uploaded. Your previous inventory is available until import completes."
+                    : "Validating all rows…"}
+                </p>
+              </div>
+            )}
+          </div>
+          <div className="modal-footer">
+            <button className="button" onClick={cancelUpload}>
+              {fileBusy ? "Cancel import" : "Cancel"}
+            </button>
+            <button
+              className="button primary"
+              disabled={
+                fileBusy || (file.mode === "replace" && !replaceConfirmed)
+              }
+              onClick={() => void upload()}
+            >
+              {fileBusy ? (
+                <LoaderCircle className="spin" size={16} />
+              ) : (
+                <Check size={16} />
+              )}
+              Save inventory
+            </button>
+          </div>
+        </Modal>
+      )}
+      {modal === "settings" && (
+        <Modal
+          error={error}
+          title="Settings"
+          onClose={() => setModal(null)}
+          wide
+        >
+          <div className="modal-body settings-body">
+            <section>
+              <h3>TCGAPIs connection</h3>
+              <p className="muted small">
+                Your API key is encrypted on the server and is never sent back
+                to this page. Opening the app or importing inventory uses no API
+                credits.
+              </p>
+              <label>
+                API key
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  placeholder={
+                    meta?.connected
+                      ? "A key is already connected"
+                      : "Paste your TCGAPIs API key"
+                  }
+                  value={keyDraft}
+                  onChange={(event) => setKeyDraft(event.target.value)}
+                />
+              </label>
+              <a
+                className="text-link"
+                href="https://tcgapis.com"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Get a TCGAPIs account <ExternalLink size={12} />
+              </a>
+              {meta?.connected && !meta.serverManagedKey && (
+                <button
+                  className="text-button danger-text"
+                  onClick={() =>
+                    void updateSettings(settings, { clearKey: true })
+                      .then(() =>
+                        setNotice(
+                          "TCGAPIs disconnected. Cached data is preserved.",
+                        ),
+                      )
+                      .catch(showError)
+                  }
+                >
+                  Disconnect key
+                </button>
+              )}
+            </section>
+            <section>
+              <h3>Pricing</h3>
+              <div className="settings-grid">
+                {(
+                  [
+                    ["feePercent", "Seller fee (%)"],
+                    ["fixedFee", "Fixed fee ($)"],
+                    ["shipping", "Shipping / card ($)"],
+                    ["minimumPrice", "Minimum listing price ($)"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key}>
+                    {label}
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.01"
+                      value={settings[key]}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          [key]: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <p className="small muted">
+                Net proceeds = suggested price × (1 − fee %) − fixed fee −
+                shipping. This excludes acquisition costs and taxes. Original
+                CSV prices are preserved.
+              </p>
+            </section>
+            <section>
+              <h3>Listing priority</h3>
+              <div className="settings-grid">
+                {(
+                  [
+                    ["velocityTarget", "Units / day for a 100 velocity score"],
+                    ["velocityWeight", "Velocity weight"],
+                    ["demandWeight", "Demand weight"],
+                    ["profitWeight", "Net proceeds weight"],
+                  ] as const
+                ).map(([key, label]) => (
+                  <label key={key}>
+                    {label}
+                    <input
+                      type="number"
+                      min="0"
+                      step="0.1"
+                      value={settings[key]}
+                      onChange={(event) =>
+                        setSettings({
+                          ...settings,
+                          [key]: Number(event.target.value),
+                        })
+                      }
+                    />
+                  </label>
+                ))}
+              </div>
+              <details>
+                <summary>How scores are calculated</summary>
+                <p className="small muted">
+                  Velocity = min(100, reported units per covered day ÷ your
+                  target × 100). Demand averages velocity with a sales-trend
+                  score of 50 + half the percentage change, bounded to 0–100.
+                  The net-proceeds score is $10 per card = 100. Listing priority
+                  is the weighted average of these scores. It remains N/A
+                  without sales and pricing data. Competition = 5 × the sellers
+                  in the returned listing sample, capped at 100. A lower
+                  competition score means fewer sampled sellers.
+                </p>
+              </details>
+            </section>
+            <section>
+              <h3>Refresh preferences</h3>
+              <div className="settings-grid">
+                <label>
+                  Data to request
+                  <select
+                    value={settings.refreshDetail}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        refreshDetail: event.target
+                          .value as Preferences["refreshDetail"],
+                      })
+                    }
+                  >
+                    <option value="standard">Pricing and sales archive</option>
+                    <option value="complete">
+                      Pricing, archive, history, and listing samples
+                    </option>
+                  </select>
+                </label>
+                <label>
+                  Archive pages per product
+                  <input
+                    type="number"
+                    min="1"
+                    max="10"
+                    value={settings.archivePages}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        archivePages: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Outdated after (hours)
+                  <input
+                    type="number"
+                    min="1"
+                    value={settings.staleHours}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        staleHours: Number(event.target.value),
+                      })
+                    }
+                  />
+                </label>
+                <label>
+                  Automatic refresh
+                  <select
+                    value={settings.autoMinutes}
+                    onChange={(event) =>
+                      setSettings({
+                        ...settings,
+                        autoMinutes: Number(event.target.value),
+                      })
+                    }
+                  >
+                    <option value="0">Off · refresh on demand</option>
+                    <option value="15">Every 15 minutes while open</option>
+                    <option value="60">Every hour while open</option>
+                    <option value="240">Every 4 hours while open</option>
+                    <option value="1440">Daily while open</option>
+                  </select>
+                </label>
+              </div>
+              <p className="small muted">
+                Automatic refresh only requests missing or outdated data while
+                this tab is open. It uses your API allowance. On-demand refresh
+                always shows a credit estimate first.
+              </p>
+            </section>
+            <section className="data-notes">
+              <h3>What the source can verify</h3>
+              <p className="small muted">
+                Three-day archive buckets report units and transaction counts
+                separately. Window totals are lower bounds. Recent product-sale
+                samples do not identify language or units. Live listings are
+                limited to an English-language US-shipping sample. Unavailable
+                totals, exact sale dates, and unverified variant matches remain
+                N/A.
+              </p>
+              <a
+                href="https://tcgapis.com/documentation"
+                target="_blank"
+                rel="noreferrer"
+              >
+                Current provider documentation <ExternalLink size={12} />
+              </a>
+            </section>
+          </div>
+          <div className="modal-footer">
+            <button
+              className="button"
+              onClick={() => {
+                if (meta) setSettings(meta.settings);
+                setModal(null);
+              }}
+            >
+              Cancel
+            </button>
+            <button
+              className="button primary"
+              disabled={saving}
+              onClick={async () => {
+                setSaving(true);
+                try {
+                  await updateSettings(
+                    settings,
+                    keyDraft ? { key: keyDraft } : undefined,
+                  );
+                  setKeyDraft("");
+                  setModal(null);
+                  setNotice("Settings saved.");
+                } catch (problem) {
+                  showError(problem);
+                } finally {
+                  setSaving(false);
+                }
+              }}
+            >
+              Save settings
+            </button>
+          </div>
+        </Modal>
+      )}
+      {modal === "columns" && (
+        <Modal
+          error={error}
+          title="Table columns"
+          onClose={() => {
+            if (meta) setSettings(meta.settings);
+            setModal(null);
+          }}
+        >
+          <div className="modal-body">
+            <p className="muted small">
+              Choose the fields you need. Drag visible columns to rearrange
+              them, or use Earlier and Later.
+            </p>
+            <div className="column-list">
+              {[
+                ...settings.visibleColumns,
+                ...columns
+                  .map((column) => column.key)
+                  .filter((key) => !settings.visibleColumns.includes(key)),
+              ].map((key) => {
+                const column = columns.find((item) => item.key === key)!;
+                const shown = settings.visibleColumns.includes(key);
+                return (
+                  <div
+                    key={key}
+                    className={
+                      shown ? "column-option visible" : "column-option"
+                    }
+                    draggable={shown}
+                    onDragStart={() => setDragColumn(key)}
+                    onDragOver={(event) => event.preventDefault()}
+                    onDrop={() => {
+                      if (!dragColumn || dragColumn === key || !shown) return;
+                      const list = settings.visibleColumns.filter(
+                        (item) => item !== dragColumn,
+                      );
+                      list.splice(list.indexOf(key), 0, dragColumn);
+                      setSettings({ ...settings, visibleColumns: list });
+                      setDragColumn(null);
+                    }}
+                  >
+                    <GripVertical size={15} />
+                    <label>
+                      <input
+                        type="checkbox"
+                        checked={shown}
+                        onChange={(event) =>
+                          setSettings({
+                            ...settings,
+                            visibleColumns: event.target.checked
+                              ? [...settings.visibleColumns, key]
+                              : settings.visibleColumns.filter(
+                                  (item) => item !== key,
+                                ),
+                          })
+                        }
+                      />
+                      {column.label}
+                    </label>
+                    {shown && (
+                      <div>
+                        <button
+                          className="text-button"
+                          disabled={settings.visibleColumns.indexOf(key) === 0}
+                          onClick={() => moveColumn(key, -1)}
+                        >
+                          Earlier
+                        </button>
+                        <button
+                          className="text-button"
+                          disabled={
+                            settings.visibleColumns.indexOf(key) ===
+                            settings.visibleColumns.length - 1
+                          }
+                          onClick={() => moveColumn(key, 1)}
+                        >
+                          Later
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+          <div className="modal-footer">
+            <button
+              className="button"
+              onClick={() =>
+                setSettings({
+                  ...settings,
+                  visibleColumns: defaults.visibleColumns,
+                })
+              }
+            >
+              Reset columns
+            </button>
+            <button
+              className="button primary"
+              disabled={saving || !settings.visibleColumns.length}
+              onClick={() => {
+                setSaving(true);
+                void updateSettings(settings)
+                  .then(() => setModal(null))
+                  .catch(showError)
+                  .finally(() => setSaving(false));
+              }}
+            >
+              Save columns
+            </button>
+          </div>
+        </Modal>
+      )}
+      {modal === "refresh" && (
+        <Modal
+          error={error}
+          title="Refresh market data"
+          onClose={() => setModal(null)}
+        >
+          <div className="modal-body">
+            <p className="muted">
+              Choose which cards to refresh. Your inventory and original CSV
+              values will stay intact.
+            </p>
+            <fieldset className="scope-options">
+              {[
+                ["all", "Entire inventory"],
+                ["filtered", "Filtered results"],
+                ["selected", "Selected cards (" + selected.size + ")"],
+              ].map(([value, label]) => (
+                <label key={value}>
+                  <input
+                    type="radio"
+                    name="refresh-scope"
+                    value={value}
+                    checked={scope === value}
+                    disabled={value === "selected" && !selected.size}
+                    onChange={() => setScope(value)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </fieldset>
+            <label className="check-label">
+              <input
+                type="checkbox"
+                checked={onlyStale}
+                onChange={(event) => setOnlyStale(event.target.checked)}
+              />
+              Only missing or outdated market data
+            </label>
+            <div className="estimate">
+              {planBusy ? (
+                <p>
+                  <LoaderCircle size={17} className="spin" />
+                  Checking your cached inventory…
+                </p>
+              ) : plan ? (
+                <>
+                  <span className="eyebrow">ESTIMATED API USAGE</span>
+                  <strong>
+                    {plan.minimumCredits === plan.maximumCredits
+                      ? plan.maximumCredits.toLocaleString()
+                      : plan.minimumCredits.toLocaleString() +
+                        "–" +
+                        plan.maximumCredits.toLocaleString()}{" "}
+                    credits
+                  </strong>
+                  <p>
+                    {plan.groups.toLocaleString()} card lookups · up to{" "}
+                    {plan.maximumRequests.toLocaleString()} requests
+                  </p>
+                  <p className="small muted">{plan.note}</p>
+                </>
+              ) : (
+                <p className="muted">No estimate available.</p>
+              )}
+            </div>
+            {!meta?.connected && (
+              <p className="connection-note">
+                Connect your TCGAPIs key in Settings to request live market
+                data. Your CSV can be used independently.
+              </p>
+            )}
+          </div>
+          <div className="modal-footer">
+            <button className="button" onClick={() => setModal(null)}>
+              Cancel
+            </button>
+            {!meta?.connected ? (
+              <button
+                className="button primary"
+                onClick={() => setModal("settings")}
+              >
+                Connect TCGAPIs
+              </button>
+            ) : (
+              <button
+                className="button primary"
+                disabled={planBusy || !plan?.groups || activeRefresh}
+                onClick={() => void runRefresh()}
+              >
+                <RefreshCw size={16} />
+                Refresh data
+              </button>
+            )}
+          </div>
+        </Modal>
+      )}
+      {modal === "export" && (
+        <Modal
+          error={error}
+          title="Export inventory"
+          onClose={() => setModal(null)}
+        >
+          <div className="modal-body">
+            <fieldset className="scope-options">
+              {[
+                ["all", "Entire inventory"],
+                ["filtered", "Filtered results"],
+                ["selected", "Selected cards (" + selected.size + ")"],
+              ].map(([value, label]) => (
+                <label key={value}>
+                  <input
+                    type="radio"
+                    name="export-scope"
+                    checked={exportScope === value}
+                    disabled={value === "selected" && !selected.size}
+                    onChange={() => setExportScope(value)}
+                  />
+                  {label}
+                </label>
+              ))}
+            </fieldset>
+            <label>
+              CSV format
+              <select
+                value={exportAnalysis ? "analysis" : "original"}
+                onChange={(event) =>
+                  setExportAnalysis(event.target.value === "analysis")
+                }
+              >
+                <option value="original">Original TCGplayer columns</option>
+                <option value="analysis">
+                  Market analysis and calculated metrics
+                </option>
+              </select>
+            </label>
+            <p className="muted small">
+              {exportAnalysis
+                ? "Analysis exports include the available retrieved values. Missing values are blank."
+                : "Your original column names and values are preserved. Retrieved market prices do not overwrite your CSV."}
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button className="button" onClick={() => setModal(null)}>
+              Cancel
+            </button>
+            <button
+              className="button primary"
+              disabled={saving}
+              onClick={() => void exportFile()}
+            >
+              <Download size={16} />
+              Download CSV
+            </button>
+          </div>
+        </Modal>
+      )}
+      {modal === "preset" && (
+        <Modal
+          error={error}
+          title="Save this view"
+          onClose={() => setModal(null)}
+        >
+          <div className="modal-body">
+            <label>
+              View name
+              <input
+                value={saveName}
+                autoFocus
+                placeholder="For example, high-value holos"
+                onChange={(event) => setSaveName(event.target.value)}
+              />
+            </label>
+            <p className="muted small">
+              Saves the current filters and sort order.
+            </p>
+            {settings.presets.length > 0 && (
+              <div className="saved-views">
+                <h3>Saved views</h3>
+                {settings.presets.map((preset, index) => (
+                  <div key={index}>
+                    <span>{preset.name}</span>
+                    <button
+                      className="text-button danger-text"
+                      onClick={() =>
+                        void updateSettings({
+                          ...settings,
+                          presets: settings.presets.filter(
+                            (_, i) => i !== index,
+                          ),
+                        }).catch(showError)
+                      }
+                    >
+                      Remove
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+          <div className="modal-footer">
+            <button className="button" onClick={() => setModal(null)}>
+              Cancel
+            </button>
+            <button
+              className="button primary"
+              disabled={!saveName.trim() || saving}
+              onClick={() => {
+                setSaving(true);
+                void updateSettings({
+                  ...settings,
+                  presets: [
+                    ...settings.presets.filter(
+                      (item) => item.name !== saveName.trim(),
+                    ),
+                    { name: saveName.trim(), filters, sort, direction },
+                  ],
+                })
+                  .then(() => {
+                    setModal(null);
+                    setNotice("View saved.");
+                  })
+                  .catch(showError)
+                  .finally(() => setSaving(false));
+              }}
+            >
+              Save view
+            </button>
+          </div>
+        </Modal>
+      )}
+      {card && (
+        <Modal
+          error={error}
+          title={card.card?.name ?? "Card details"}
+          onClose={() => setCard(null)}
+          wide
+        >
+          <div className="modal-body card-detail">
+            {cardLoading ? (
+              <div className="detail-loading">
+                <LoaderCircle size={22} className="spin" />
+                Loading card details…
+              </div>
+            ) : (
+              <>
+                <div className="detail-header">
+                  {card.detail?.product?.imageUrl && (
+                    <img
+                      src={card.detail.product.imageUrl}
+                      alt={card.card.name}
+                      referrerPolicy="no-referrer"
+                    />
+                  )}
+                  <div>
+                    <p>
+                      {card.card.set}
+                      {card.card.number ? " · " + card.card.number : ""}
+                    </p>
+                    <p className="muted">
+                      {card.card.condition || "Condition not provided"} ·{" "}
+                      {card.card.printing || "Printing not provided"} ·{" "}
+                      {card.card.language || "Language not provided"}
+                    </p>
+                    <p className="small muted">
+                      TCGplayer SKU {card.card.skuId || "N/A"} · Product{" "}
+                      {card.detail?.product?.productId ||
+                        card.card.productId ||
+                        "N/A"}{" "}
+                      · {card.card.quantity} owned
+                    </p>
+                    <p className="small muted">
+                      Market refreshed {dateLabel(card.fetchedAt)}
+                    </p>
+                  </div>
+                </div>
+                {card.detail && (
+                  <>
+                    <div
+                      className="chart-tabs"
+                      role="group"
+                      aria-label="History chart"
+                    >
+                      <button
+                        className={historyType === "market" ? "active" : ""}
+                        onClick={() => setHistoryType("market")}
+                      >
+                        Market prices
+                      </button>
+                      <button
+                        className={historyType === "units" ? "active" : ""}
+                        onClick={() => setHistoryType("units")}
+                      >
+                        Sales volume
+                      </button>
+                      <button
+                        className={historyType === "sales" ? "active" : ""}
+                        onClick={() => setHistoryType("sales")}
+                      >
+                        Sale price ranges
+                      </button>
+                    </div>
+                    <HistoryChart
+                      history={card.detail.history ?? []}
+                      type={historyType}
+                    />
+                    <p className="small muted">
+                      Historical data is grouped into three-day source buckets.{" "}
+                      {card.detail.coveredDays ?? 0} days are covered in the
+                      current 30-day sales window.
+                    </p>
+                  </>
+                )}
+                <div className="detail-metrics">
+                  {columns
+                    .filter(
+                      (column) =>
+                        ![
+                          "name",
+                          "number",
+                          "set",
+                          "productId",
+                          "skuId",
+                          "condition",
+                          "printing",
+                          "rarity",
+                          "language",
+                          "quantity",
+                          "fetchedAt",
+                        ].includes(column.key),
+                    )
+                    .map((column) => (
+                      <div key={column.key}>
+                        <span title={column.note}>{column.label}</span>
+                        <strong>
+                          {column.key.startsWith("units") &&
+                          card.market?.[column.key] !== null &&
+                          card.market?.[column.key] !== undefined
+                            ? "≥"
+                            : ""}
+                          {formatValue(
+                            result.rows.find(
+                              (row) => row.key === card.card.key,
+                            )?.[column.key] ?? card.market?.[column.key],
+                            column.kind,
+                          )}
+                        </strong>
+                      </div>
+                    ))}
+                </div>
+                {card.detail?.notes?.map((note: string, index: number) => (
+                  <p className="source-note" key={index}>
+                    {note}
+                  </p>
+                ))}
+                {card.detail?.recentSales?.length > 0 && (
+                  <details>
+                    <summary>
+                      Recent product sales · language and units not reported
+                    </summary>
+                    <div className="import-preview">
+                      <table>
+                        <thead>
+                          <tr>
+                            <th>Date</th>
+                            <th>Condition</th>
+                            <th>Printing</th>
+                            <th>Price including shipping</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {card.detail.recentSales
+                            .slice(0, 20)
+                            .map((sale: RecordValue, index: number) => (
+                              <tr key={index}>
+                                <td>{sale.date}</td>
+                                <td>{sale.condition}</td>
+                                <td>{sale.variant}</td>
+                                <td>{formatValue(sale.price, "money")}</td>
+                              </tr>
+                            ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </details>
+                )}
+                <details>
+                  <summary>Original CSV values</summary>
+                  <p className="small muted">
+                    Showing up to 20 original rows for this card. Exports
+                    preserve every row.
+                  </p>
+                  {card.originals?.map(
+                    (original: RecordValue, index: number) => (
+                      <dl key={index} className="original-values">
+                        {Object.entries(original).map(([key, value]) => (
+                          <div key={key}>
+                            <dt>{key}</dt>
+                            <dd>{String(value)}</dd>
+                          </div>
+                        ))}
+                      </dl>
+                    ),
+                  )}
+                </details>
+              </>
+            )}
+          </div>
+        </Modal>
+      )}
+    </div>
+  );
+}
