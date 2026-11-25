@@ -8,8 +8,8 @@ export default function HistoryChart({history}:{history:Record<string,any>[]}) {
       <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--line)"/>
       <XAxis dataKey="label" tick={{fontSize:12}} tickLine={false} axisLine={false} minTickGap={30}/>
       <YAxis allowDecimals={false} tick={{fontSize:12}} tickLine={false} axisLine={false} width={48}/>
-      <Tooltip contentStyle={{border:"1px solid var(--line)",background:"var(--surface)",color:"var(--ink)",borderRadius:8,fontSize:13}}/>
-      <Bar dataKey="units" name="Units sold per reported week" fill="var(--green)" radius={[3,3,0,0]}/>
+      <Tooltip cursor={false} isAnimationActive={false} contentStyle={{border:"1px solid var(--line)",background:"var(--surface)",color:"var(--ink)",borderRadius:8,fontSize:13}}/>
+      <Bar activeBar={false} isAnimationActive={false} dataKey="units" name="Units sold per reported week" fill="var(--green)" radius={[3,3,0,0]}/>
     </BarChart>
   </ResponsiveContainer></div>;
 }

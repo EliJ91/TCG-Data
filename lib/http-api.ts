@@ -71,7 +71,12 @@ export async function handleApi(request:Request,owner:string,path:string,allowed
         return Response.json(await state(owner), {
           headers: { "Cache-Control": "no-store" },
         });
-      if (path === "facets") return Response.json(await facets(owner));
+      if (path === "facets") {
+        const keys = url.searchParams.getAll("column");
+        const dateFrom = url.searchParams.get("dateFrom") ?? "";
+        const dateTo = url.searchParams.get("dateTo") ?? "";
+        return Response.json(await facets(owner,keys.length ? {keys,dateFrom,dateTo} : undefined));
+      }
       if (path === "cards")
         return Response.json(
           await queryCards(

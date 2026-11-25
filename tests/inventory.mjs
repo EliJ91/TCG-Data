@@ -328,3 +328,52 @@ test("Warm sync transfers only changed inventory rows and marketplace events", a
  await sync.limitOperation(owner,"test-window",1,60000);
  await assert.rejects(()=>sync.limitOperation(owner,"test-window",1,60000),{status:429});
 });
+
+test("Visible-column facets and filters use raw CSV values and the displayed sales period",async()=>{
+ const header = "Seller's \"Tags\"";
+ const csvRows = [
+  ["Lookup","Condition","Printing","Language","Tags",header,"Internal"],
+  ["11","Near Mint","Foil","English","001","Shelf A","Hidden 1"],
+  ["22","Lightly Played","Normal","Japanese","1","Shelf B","Hidden 2"],
+  ["33","Near Mint","Normal","English","","Shelf A","Hidden 3"],
+ ];
+ const initial = await upload(csvRows.map(row=>row.map(csv.csvCell).join(",")).join("\n"));
+ const putMarket = sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data,detail=excluded.detail");
+ for (const [productId,units] of [["11",0],["22",8],["33",3]]) {
+  const key = "product:"+productId+"|row:0";
+  const first = Date.UTC(2026,0,1), second = Date.UTC(2026,0,8);
+  putMarket.run(owner+"|"+key,owner,key,productId,second,JSON.stringify({scope:"Product",unitsSold:units+2,available:true}),JSON.stringify({history:[{date:first,units:2},{date:second,units}]}));
+ }
+ const version = (await sync.syncMetadata(owner,null)).version;
+ const snapshot = await sync.syncInventory(owner,new URLSearchParams({version}));
+ const entries = local.indexInventory(snapshot.rows);
+ const visibleKeys = ["csv:Condition","csv:Printing","csv:Language","csv:Tags",domain.csvColumnKey(header),"unitsSold","historyFrom","fetchedAt","scope"];
+ const start = "2026-01-08";
+ const facets = local.inventoryFacets(entries,visibleKeys,start,start);
+ assert.deepEqual(Object.keys(facets),visibleKeys);
+ assert.deepEqual(facets["csv:Condition"],["Lightly Played","Near Mint"]);
+ assert.deepEqual(facets["csv:Printing"],["Foil","Normal"]);
+ assert.deepEqual(facets["csv:Language"],["English","Japanese"]);
+ assert.deepEqual(facets["csv:Tags"],["001","1"]);
+ assert.deepEqual(facets[domain.csvColumnKey(header)],["Shelf A","Shelf B"]);
+ assert.deepEqual(facets.unitsSold,[0,3,8]);
+ assert.deepEqual(facets.historyFrom,[Date.UTC(2026,0,1)]);
+ assert.deepEqual(facets.scope,["Product"]);
+ assert.deepEqual(await data.facets(owner,{keys:visibleKeys,dateFrom:start,dateTo:start}),facets);
+
+ const filters = {...domain.emptyFilters,dateFrom:start,dateTo:start,categories:{
+  "csv:Tags":["001"],
+  "csv:Condition":["Near Mint"],
+  [domain.csvColumnKey(header)]:["Shelf A"],
+  unitsSold:[0],
+ }};
+ const query = {filters};
+ assert.deepEqual(local.queryLocalInventory(entries,query,24).rows.map(row=>row["csv:Lookup"]),["11"]);
+ assert.deepEqual((await data.queryCards(owner,query)).rows.map(row=>row["csv:Lookup"]),["11"]);
+ const localCsv = await local.localExport(entries,query,initial.headers,24,false).text();
+ const serverCsv = await (await data.exportInventory(owner,query)).text();
+ assert.deepEqual(csv.parseCSV(localCsv),csv.parseCSV(serverCsv));
+ assert.equal(csv.parseCSV(serverCsv).records.length,1);
+ const saved = await data.savePreferences(owner,{settings:{currentView:{...initial.settings.currentView,filters}},settingsOnly:true});
+ assert.deepEqual(saved.settings.currentView.filters.categories,filters.categories);
+});

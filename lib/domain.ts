@@ -13,9 +13,14 @@ export type CardInfo = {
 };
 export type ImportRow = { info: CardInfo; raw: Record<string, string> };
 export type NumericFilter = { field: string; min: string; max: string };
+export type CategoryValue = string | number;
+export const legacyCategoryColumns = ["set", "condition", "printing", "language", "rarity"] as const;
+export function isCategoryValue(value: unknown): value is CategoryValue {
+  return typeof value === "string" ? value.trim().length > 0 : typeof value === "number" && Number.isFinite(value);
+}
 export type Filters = {
   search: string;
-  categories: Record<string, string[]>;
+  categories: Record<string, CategoryValue[]>;
   numeric: NumericFilter[];
   freshness: string;
   dateField: string;

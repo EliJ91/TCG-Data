@@ -23,6 +23,9 @@ import {
 } from "lucide-react";
 import {
   inventoryColumns,
+  columns as standardColumns,
+  type CategoryValue,
+  type Column,
   marketColumns,
   normalizeFilters,
   normalizeView,
@@ -38,7 +41,7 @@ import { type Mapping } from "../lib/csv";
 import ImportWorker from "../lib/import.worker?worker";
 import InventoryCell from "./InventoryCell";
 import { readInventoryCache, synchronizeInventory } from "../lib/inventory-cache";
-import { describeInventory, indexInventory, localExport, queryLocalInventory, type InventorySnapshot } from "../lib/local-inventory";
+import { describeInventory, indexInventory, inventoryFacets, localExport, queryLocalInventory, type InventorySnapshot } from "../lib/local-inventory";
 
 const HistoryChart = lazy(() => import("./HistoryChart"));
 type RecordValue = Record<string, any>;
@@ -148,48 +151,64 @@ function Modal({
   );
 }
 function CategoryFilter({
-  name,
+  column,
   values,
   chosen,
   onChange,
 }: {
-  name: string;
-  values: string[];
-  chosen: string[];
-  onChange: (values: string[]) => void;
+  column: Column;
+  values: CategoryValue[];
+  chosen: CategoryValue[];
+  onChange: (values: CategoryValue[]) => void;
 }) {
   const [search, setSearch] = useState("");
+  const [limit, setLimit] = useState(100);
+  const options = useMemo(() => {
+    const groups = new Map<string, CategoryValue[]>();
+    for (const value of new Set([...values, ...chosen])) {
+      const label = formatValue(value,column.kind);
+      const group = groups.get(label);
+      if (group) group.push(value);
+      else groups.set(label,[value]);
+    }
+    return [...groups];
+  }, [values, chosen, column.kind]);
+  const matching = options.filter(([label]) => label.toLowerCase().includes(search.toLowerCase()));
+  const selection = new Set(chosen);
   return (
     <fieldset className="category">
-      <legend>{name}</legend>
-      {values.length > 8 && (
+      <legend>{column.label}</legend>
+      {options.length > 8 && (
         <input
-          placeholder={"Find " + name.toLowerCase()}
+          aria-label={"Find " + column.label}
+          placeholder={"Find " + column.label.toLowerCase()}
           value={search}
-          onChange={(event) => setSearch(event.target.value)}
+          onChange={(event) => { setSearch(event.target.value); setLimit(100); }}
         />
       )}
       <div>
-        {values
-          .filter((value) => value.toLowerCase().includes(search.toLowerCase()))
-          .map((value) => (
-            <label key={value}>
-              <input
-                type="checkbox"
-                checked={chosen.includes(value)}
-                onChange={(event) =>
-                  onChange(
-                    event.target.checked
-                      ? [...chosen, value]
-                      : chosen.filter((item) => item !== value),
-                  )
+        {matching.slice(0,limit).map(([label,group]) => (
+          <label key={label}>
+            <input
+              type="checkbox"
+              checked={group.some(value=>selection.has(value))}
+              onChange={(event) => {
+                const next = new Set(chosen);
+                for (const value of group) {
+                  if (event.target.checked) next.add(value);
+                  else next.delete(value);
                 }
-              />
-              <span>{value}</span>
-            </label>
-          ))}
-        {!values.length && (
-          <span className="muted small">No values imported</span>
+                onChange([...next]);
+              }}
+            />
+            <span title={label}>{label}</span>
+          </label>
+        ))}
+        {matching.length > limit && (
+          <button className="text-button" onClick={()=>setLimit(limit+100)}>Show more values</button>
+        )}
+        {!matching.length && (
+          <span className="muted small">{options.length ? "No matching values" : "No values"}</span>
         )}
       </div>
     </fieldset>
@@ -246,7 +265,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     [loading, setLoading] = useState(true),
     [error, setError] = useState(""),
     [notice, setNotice] = useState("");
-  const [facets, setFacets] = useState<Record<string, string[]>>({}),
+  const [serverFacets, setServerFacets] = useState<Record<string, CategoryValue[]>>({}),
     [selected, setSelected] = useState<Set<string>>(new Set());
   const [advanced, setAdvanced] = useState(false),
     [view, setView] = useState("all"),
@@ -314,6 +333,29 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const visible = settings.visibleColumns
     .map((key) => columns.find((column) => column.key === key)!)
     .filter(Boolean);
+  const filterColumns = [
+    ...visible,
+    // Keep a selected filter removable when its column is hidden or comes from a saved view.
+    ...Object.entries(filters.categories).flatMap(([key, values]) => {
+      if (!values.length || visible.some(column=>column.key===key)) return [];
+      const column = columns.find(column=>column.key===key) ?? standardColumns.find(column=>column.key===key);
+      return column ? [{...column,label:column.label+" (hidden)"}] : [];
+    }),
+  ];
+  const facetKeys = JSON.stringify(filterColumns.map(column=>column.key));
+  const localFacets = useMemo(() => advanced && localEntries
+    ? inventoryFacets(localEntries, JSON.parse(facetKeys), filters.dateFrom, filters.dateTo)
+    : {}, [advanced, localEntries, facetKeys, filters.dateFrom, filters.dateTo]);
+  const facets = localEntries ? localFacets : serverFacets;
+  useEffect(() => {
+    if (!advanced || localEntries || !hasInventory || facetKeys === "[]") return;
+    const controller = new AbortController();
+    const params = new URLSearchParams({dateFrom:filters.dateFrom,dateTo:filters.dateTo});
+    for (const key of JSON.parse(facetKeys) as string[]) params.append("column",key);
+    void api<Record<string,CategoryValue[]>>("facets?"+params.toString(),undefined,controller.signal)
+      .then(setServerFacets).catch(problem=>{ if (!controller.signal.aborted) setError(problem.message); });
+    return () => controller.abort();
+  }, [advanced, localEntries, hasInventory, facetKeys, filters.dateFrom, filters.dateTo, dataRevision]);
   const query = { filters, sort, direction, page, pageSize };
   const scopeQuery = (choice: string) => ({
     filters: choice === "all" || choice === "selected" ? emptyFilters : filters,
@@ -360,13 +402,11 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         const inventory = describeInventory(indexInventory(current.cards));
         snapshotRef.current = current;
         setSnapshot(current);
-        setFacets(inventory.facets);
         data = {...current.meta,...inventory.totals};
       }
     }
     if (!data) {
       data = await api<Metadata>("state");
-      setFacets(await api("facets"));
     }
     setMeta(data);
     setSettings(data.settings);
@@ -1084,25 +1124,23 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           {advanced && (
             <section className="filter-panel" aria-label="Advanced filters">
               <div className="filter-categories">
-                {["set", "condition", "printing", "language", "rarity"].map(
-                  (field) => (
-                    <CategoryFilter
-                      key={field}
-                      name={field[0].toUpperCase() + field.slice(1)}
-                      values={facets[field] ?? []}
-                      chosen={filters.categories[field] ?? []}
-                      onChange={(values) =>
-                        changeFilters({
-                          ...filters,
-                          categories: {
-                            ...filters.categories,
-                            [field]: values,
-                          },
-                        })
-                      }
-                    />
-                  ),
-                )}
+                {filterColumns.map(column => (
+                  <CategoryFilter
+                    key={column.key}
+                    column={column}
+                    values={facets[column.key] ?? []}
+                    chosen={filters.categories[column.key] ?? []}
+                    onChange={(values) =>
+                      changeFilters({
+                        ...filters,
+                        categories: {
+                          ...filters.categories,
+                          [column.key]: values,
+                        },
+                      })
+                    }
+                  />
+                ))}
               </div>
               <div className="numeric-filters">
                 {filters.numeric.map((filter, index) => (

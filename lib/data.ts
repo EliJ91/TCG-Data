@@ -4,7 +4,11 @@ import {
   inventoryColumns,
   inventoryPreferences,
   csvColumnKey,
+  isCategoryValue,
+  legacyCategoryColumns,
+  type CategoryValue,
   normalizePreferences,
+  emptyFilters,
   type Preferences,
   type Filters,
   type ImportRow,
@@ -429,15 +433,13 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
     );
     values.push(search, search, search, search, search, search);
   }
-  for (const [key, list] of Object.entries(f?.categories ?? {}))
-    if (
-      ["condition", "printing", "language", "set", "rarity"].includes(key) &&
-      Array.isArray(list) &&
-      list.length
-    ) {
-      where.push(e[key] + " IN (SELECT value FROM json_each(?))");
-      values.push(JSON.stringify(list));
-    }
+  for (const [key, list] of Object.entries(f?.categories ?? {})) {
+    if (!Object.hasOwn(e,key) || key === "rowNo" || !Array.isArray(list)) continue;
+    const choices = list.filter(isCategoryValue);
+    if (!choices.length) continue;
+    where.push(e[key] + " IN (SELECT value FROM json_each(?))");
+    values.push(JSON.stringify(choices));
+  }
   for (const filter of f?.numeric ?? []) {
     if (
       !columns.some(
@@ -518,23 +520,28 @@ export async function queryCards(owner: string, input: QueryInput) {
     .all();
   return { rows: rows.results, page, pageSize, ...total };
 }
-export async function facets(owner: string) {
-  const space = await workspace(owner),
-    result: Record<string, string[]> = {};
-  for (const field of ["set", "condition", "printing", "language", "rarity"]) {
-    const rows = await database()
-      .prepare(
-        "SELECT DISTINCT json_extract(info,'$." +
-          field +
-          "') AS value FROM cards WHERE owner=? AND version=? AND json_extract(info,'$." +
-          field +
-          "')<>'' ORDER BY value",
-      )
-      .bind(owner, space.active_version ?? "")
-      .all<{ value: string }>();
-    result[field] = rows.results.map((row) => row.value);
-  }
-  return result;
+export async function facets(owner: string, input?: {keys: string[]; dateFrom: string; dateTo: string}) {
+  const space = await workspace(owner);
+  const keys = input?.keys ?? [...legacyCategoryColumns];
+  const headers: string[] = JSON.parse(space.headers);
+  const allowed = new Set([...columns, ...inventoryColumns(headers)].map(column=>column.key));
+  const selected = [...new Set(keys)].filter(key=>allowed.has(key));
+  if (!selected.length) return {};
+  const query = buildQuery(owner,space,{
+    filters:{...emptyFilters,dateFrom:input?.dateFrom ?? "",dateTo:input?.dateTo ?? ""},
+  },true);
+  const identifier = (key: string) => '"' + key.replaceAll('"','""') + '"';
+  const aggregates = selected.map(key => {
+    const column = identifier(key);
+    return "json_group_array(DISTINCT " + column + ") FILTER (WHERE " + column + " IS NOT NULL) AS " + column;
+  }).join(",");
+  const row = await database().prepare("SELECT "+aggregates+" FROM ("+query.sql+")").bind(...query.values)
+    .first<Record<string,string>>();
+  return Object.fromEntries(selected.map(key=>[
+    key,
+    (JSON.parse(row?.[key] ?? "[]") as unknown[]).filter(isCategoryValue).sort((a,b) =>
+      typeof a === "number" && typeof b === "number" ? a-b : String(a).localeCompare(String(b))),
+  ])) as Record<string,CategoryValue[]>;
 }
 export async function exportInventory(
   owner: string,
