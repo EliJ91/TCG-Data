@@ -47,6 +47,7 @@ import { readInventoryCache, synchronizeInventory } from "../lib/inventory-cache
 import { describeInventory, indexInventory, inventoryFacets, localExport, queryLocalInventory, type InventorySnapshot } from "../lib/local-inventory";
 
 const HistoryChart = lazy(() => import("./HistoryChart"));
+const salesColumnKeys = new Set(marketColumns.map(column => column.key));
 type RecordValue = Record<string, any>;
 type Metadata = {
   headers: string[];
@@ -943,7 +944,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   <button
                     className="button"
                     disabled={fileBusy || activeRefresh}
-                    onClick={() => openFile("update")}
+                    onClick={() => openFile("replace")}
                   >
                     <Upload size={16} />
                     Update CSV
@@ -951,9 +952,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   <button
                     className="button"
                     disabled={fileBusy || activeRefresh}
-                    onClick={() => openFile("replace")}
+                    onClick={() => openFile("update")}
                   >
-                    Replace CSV
+                    Merge CSV
                   </button>
                 </>
               )}
@@ -1417,18 +1418,20 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                             ) : (
                               <span
                                 className={
-                                  row[column.key] === null ? "unavailable" : ""
+                                  row[column.key] == null ? "unavailable" : ""
                                 }
                               >
                                 {column.key.startsWith("units") && row.lowerBound &&
                                 row[column.key] !== null
                                   ? "≥"
                                   : ""}
-                                <InventoryCell
-                                  value={row[column.key]}
-                                  column={column}
-                                  cardName={row.name || "Card " + row.productId}
-                                />
+                                {!row.analyzed && row[column.key] == null && salesColumnKeys.has(column.key) ? "No Data" : (
+                                  <InventoryCell
+                                    value={row[column.key]}
+                                    column={column}
+                                    cardName={row.name || "Card " + row.productId}
+                                  />
+                                )}
                               </span>
                             )}
                           </td>
@@ -1565,9 +1568,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           error={error}
           title={
             file.mode === "replace"
-              ? "Replace inventory"
+              ? "Update inventory CSV"
               : file.mode === "update"
-                ? "Update inventory"
+                ? "Merge inventory CSV"
                 : "Import inventory"
           }
           onClose={cancelUpload}
@@ -1587,8 +1590,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             <p className="muted">
               {file.mode === "update"
                 ? "Matching cards will be updated and new cards added. Cards absent from this CSV stay in inventory."
-                : "The complete file is validated before your saved inventory changes."}{" "}
-              Cached market data is kept separately.
+                : "Only cards in this CSV will appear in your inventory. Saved sales history stays linked to its Product ID, including cards that are removed and added again later."}
             </p>
             <label>
               Which column contains the TCGplayer Product IDs?
@@ -1607,7 +1609,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                     setReplaceConfirmed(event.target.checked)
                   }
                 />
-                Replace all current inventory with this validated file.
+                Use this CSV as the current inventory.
               </label>
             )}
             {fileBusy && (
@@ -2113,7 +2115,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                           card.market?.[column.key] !== undefined
                             ? "≥"
                             : ""}
-                          {formatValue(
+                          {!card.market?.analyzed && !card.market?.available ? "No Data" : formatValue(
                             selectedCardRow ? selectedCardRow[column.key] : card.market?.[column.key],
                             column.kind,
                           )}

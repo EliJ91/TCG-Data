@@ -26,7 +26,9 @@ Only the explicit **Pull Sales History** action starts a lookup after the credit
 
 The table appends quantities sold, sales coverage and available history dates. It has no generated price, fee, profitability, valuation or listing metrics. Original CSV columns remain intact. Product-only rows combine counts across all returned variants; legacy SKU rows match their exact variant.
 
-After pulling, From/To controls recalculate Units sold using saved bucket dates. Sorting, numeric filters, charts and appended CSV exports use the selected dates without provider calls. Annual buckets are weekly: the interface identifies them as whole reported weekly totals, never exact individual-day sales. Missing data remains N/A; a reported zero is zero. Repeated pulls replace matching bucket dates and preserve older saved annual buckets rather than double-counting them. Older cached history is readable without a paid refresh.
+After pulling, From/To controls recalculate Units sold using saved bucket dates. Sorting, numeric filters, charts and appended CSV exports use the selected dates without provider calls. Annual buckets are reported as whole weeks. New products show No Data until sales history is pulled. A reported zero is zero. Repeated pulls replace matching bucket dates and preserve older saved annual buckets. Older cached history is readable without a paid refresh.
+
+**Update CSV** replaces the active inventory with the uploaded list. Saved sales history stays tied to each Product ID, including products absent from the new list. Their history reappears when they are listed again. **Merge CSV** also keeps inventory rows absent from the upload.
 
 ## Hosting and privacy
 

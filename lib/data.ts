@@ -324,6 +324,21 @@ export async function commitImport(owner: string, id: string, lightweight = fals
         "INSERT INTO cards (id,owner,version,card_key,info,quantity) SELECT ?||':'||card_key,owner,version,card_key,MIN(info),SUM(CAST(json_extract(info,'$.quantity') AS REAL)) FROM inventory_rows WHERE owner=? AND version=? GROUP BY owner,version,card_key",
       )
       .bind(id, owner, id),
+    // Earlier imports could save product history under numbered duplicate keys.
+    // Keep those archives and restore product-level history to the canonical key.
+    database().prepare(`INSERT INTO market (id,owner,card_key,product_id,fetched_at,data,detail)
+      SELECT c.owner||'|'||c.card_key,c.owner,c.card_key,saved.product_id,saved.fetched_at,saved.data,saved.detail
+      FROM cards c JOIN market saved ON saved.id=(
+        SELECT old.id FROM market old
+        WHERE old.owner=c.owner AND old.product_id=json_extract(c.info,'$.productId')
+          AND old.card_key GLOB 'product:*|row:*'
+          AND COALESCE(json_extract(old.data,'$.available'),0)=1
+        ORDER BY old.fetched_at DESC,old.card_key LIMIT 1
+      )
+      WHERE c.owner=? AND c.version=?
+        AND c.card_key='product:'||json_extract(c.info,'$.productId')||'|row:0'
+        AND NOT EXISTS (SELECT 1 FROM market m WHERE m.owner=c.owner AND m.card_key=c.card_key)`
+    ).bind(owner,id),
     database()
       .prepare(
         "UPDATE workspaces SET active_version=?,filename=?,headers=?,settings=?,imported_at=COALESCE(imported_at,?),updated_at=?,import_lock=NULL WHERE owner=? AND import_lock=?",
@@ -418,14 +433,14 @@ export type QueryInput = {
   selected?: string[];
   displayColumns?: string[];
 };
-export function buildQuery(owner: string, space: Workspace, input: QueryInput, forCount = false) {
+export function buildQuery(owner: string, space: Workspace, input: QueryInput, forCount = false, fields?: readonly string[]) {
   const p = preferences(space),
     e = expressions(p),
     f = input.filters;
   const headers: string[] = JSON.parse(space.headers);
   const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
   for (const header of headers)
-    e[csvColumnKey(header)] = "(SELECT value FROM json_each(r.raw) WHERE key='" + header.replaceAll("'", "''") + "')";
+    e[csvColumnKey(header)] = "json_extract(r.raw,'$." + JSON.stringify(header).replaceAll("'", "''") + "')";
   e.rowNo = "r.row_no";
   const from = f?.dateFrom ? Date.parse(f.dateFrom) : null, to = f?.dateTo ? Date.parse(f.dateTo) : null;
   if ((from !== null && !Number.isFinite(from)) || (to !== null && !Number.isFinite(to)) || (from !== null && to !== null && from > to)) throw new AppError("Choose a valid sales date range with the start before the end.");
@@ -440,8 +455,8 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
     const displayed = [...new Set(input.displayColumns)].filter(key=>key!=="rowNo" && Object.hasOwn(e,key));
     const hasValue = (expression: string) =>
       "UPPER(COALESCE(TRIM(CAST("+expression+" AS TEXT),"+sqlWhitespace+"),'')) NOT IN ('','N/A')";
-    const checks = displayed.filter(key=>!key.startsWith("csv:")).map(key=>hasValue(e[key]));
-    const csvHeaders = displayed.filter(key=>key.startsWith("csv:")).map(key=>key.slice(4));
+    const checks = displayed.filter(key=>!key.startsWith("csv:") || displayed.length<=64).map(key=>hasValue(e[key]));
+    const csvHeaders = displayed.length>64 ? displayed.filter(key=>key.startsWith("csv:")).map(key=>key.slice(4)) : [];
     if (csvHeaders.length) {
       checks.unshift("EXISTS (SELECT 1 FROM json_each(r.raw) cell WHERE cell.key IN (SELECT value FROM json_each(?)) AND "+hasValue("cell.value")+")");
       values.push(JSON.stringify(csvHeaders));
@@ -505,18 +520,26 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
       ? (input.sort ?? "rowNo")
       : "rowNo",
     direction = input.direction === "asc" ? "ASC" : "DESC";
-  const select = [...columns, ...inventoryColumns(headers).filter(column => column.key.startsWith("csv:"))]
-    .map((column) => e[column.key] + ' AS ' + quote(column.key))
-    .join(",");
+  const output: Record<string,string> = {
+    ...e,
+    granularity: "json_extract(m.data,'$.granularity')",
+    historyRange: "json_extract(m.data,'$.historyRange')",
+    lowerBound: "json_extract(m.data,'$.lowerBound')",
+    analyzed: "COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0)",
+    partial: "json_extract(m.data,'$.partial')",
+    available: "json_extract(m.data,'$.available')",
+  };
+  const select = ["c.card_key AS key", ...(fields ?? Object.keys(output))
+    .map((key) => output[key] + ' AS ' + quote(key))].join(",");
   const order =
     e[sort] + " IS NULL," + e[sort] + ' ' + direction + ",c.card_key ASC";
   const limit = f?.limit === 50 || f?.limit === 100 ? f.limit : 0;
   const sql =
-    "SELECT c.card_key AS key," +
+    "SELECT " +
     select +
     // Pin the card lookup index: SQLite otherwise favors row order and scans
     // the entire inventory once per card on large imports.
-    ",r.row_no AS rowNo,json_extract(m.data,'$.granularity') AS granularity,json_extract(m.data,'$.historyRange') AS historyRange,json_extract(m.data,'$.lowerBound') AS lowerBound,COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0) AS analyzed,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN inventory_rows r ON r.id=(SELECT id FROM inventory_rows INDEXED BY rows_card WHERE owner=c.owner AND version=c.version AND card_key=c.card_key ORDER BY row_no LIMIT 1) WHERE " +
+    " FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN inventory_rows r ON r.id=(SELECT id FROM inventory_rows INDEXED BY rows_card WHERE owner=c.owner AND version=c.version AND card_key=c.card_key ORDER BY row_no LIMIT 1) WHERE " +
     where.join(" AND ") +
     (forCount && !limit ? "" : " ORDER BY " + order) +
     (limit ? " LIMIT " + limit : "");
@@ -530,7 +553,7 @@ export async function queryCards(owner: string, input: QueryInput) {
     pageSize = [25, 50, 100].includes(Number(input.pageSize))
       ? Number(input.pageSize)
       : 50;
-  const countQuery = buildQuery(owner,space,input,true);
+  const countQuery = buildQuery(owner,space,input,true,["quantity","fetchedAt"]);
   const total = await db
     .prepare(
       "WITH result AS (" +
@@ -555,7 +578,7 @@ export async function facets(owner: string, input?: {keys: string[]; dateFrom: s
   if (!selected.length) return {};
   const query = buildQuery(owner,space,{
     filters:{...emptyFilters,dateFrom:input?.dateFrom ?? "",dateTo:input?.dateTo ?? ""},
-  },true);
+  },true,selected);
   const identifier = (key: string) => '"' + key.replaceAll('"','""') + '"';
   const aggregates = selected.map(key => {
     const column = identifier(key);
@@ -574,7 +597,7 @@ export async function exportInventory(
   input: QueryInput & { analysis?: boolean },
 ) {
   const space = await workspace(owner),
-    query = buildQuery(owner, space, input),
+    query = buildQuery(owner, space, input, false, input.analysis ? undefined : []),
     exportColumns = inventoryColumns(JSON.parse(space.headers)),
     headers = input.analysis
       ? exportColumns.map((column) => column.label)

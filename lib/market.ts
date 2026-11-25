@@ -57,11 +57,12 @@ export async function refreshPlan(owner:string,input:RefreshInput) {
   const limit = 2_000_000;
   const budgetError = "Sales-history planning is paused until the next UTC day to leave database capacity for browsing.";
   if ((usage ?? 0) >= limit) throw new AppError(budgetError, 429);
-  const space=await workspace(owner),p=preferences(space),q=buildQuery(owner,space,input);
+  const space=await workspace(owner),p=preferences(space);
   const mode=input.mode;
   if (mode!==undefined && mode!=="all" && mode!=="missing") throw new AppError("Choose a sales-history pull mode.");
   const options={range:"annual",includePricing:false,includeListings:false,mode};
-  const rows=await db.prepare("SELECT key,productId,skuId,fetchedAt,partial,available,analyzed,historyRange FROM ("+q.sql+")").bind(...q.values).all<Json>();
+  const query = buildQuery(owner,space,input,false,["productId","skuId","fetchedAt","partial","analyzed","historyRange"]);
+  const rows=await db.prepare(query.sql).bind(...query.values).all<Json>();
   const covered = new Set(rows.results.filter(row=>row.analyzed && row.productId).map(row=>String(row.productId)));
   const f=input.filters;
   const narrowed=input.selected?.length || input.displayColumns?.length || f?.search?.trim() ||

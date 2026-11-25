@@ -129,6 +129,63 @@ test("Server removes duplicates across chunks and updates while retaining first-
  } finally {globalThis.fetch=realFetch;}
 });
 
+test("Replacing a CSV retains and restores product sales while hiding removed cards", async () => {
+ const owner = "replacement-history-test";
+ const requests = [];
+ const fetchOriginal = globalThis.fetch;
+ globalThis.fetch = async input => {
+  const path = new URL(String(input)).pathname;
+  requests.push(path);
+  assert.equal(path,"/v1/account");
+  return Response.json({
+   account:{id:"replacement-test",status:"active"},
+   credits:{free:10,free_resets_at:new Date(Date.now()+86400000).toISOString()},
+   spend:{this_month:0,monthly_limit:10,period:"UTC"},
+  });
+ };
+ const replace = async (csvText, prev = null) => {
+  const prepared = csv.prepareImport(csvText,{productId:"Lookup"});
+  const {id}=await data.startImport(owner,{mode:"replace",filename:"new.csv",headers:prepared.headers,count:prepared.rows.length});
+  await data.uploadChunk(owner,id,0,prepared.rows);
+  await data.commitImport(owner,id,true);
+  return clientSync.synchronizeInventory((route) => {
+   const [path,query]=route.split("?");
+   const params=new URLSearchParams(query);
+   if (path==="sync/meta") return sync.syncMetadata(owner,params.get("version"));
+   assert.equal(path,"sync/inventory");
+   return sync.syncInventory(owner,params);
+  },owner,prev);
+ };
+ const visible = snapshot => local.queryLocalInventory(local.indexInventory(snapshot.cards),{sort:"rowNo",direction:"asc"},24)
+  .rows.map(row=>[row.productId,row["csv:Name"],row.unitsSold]);
+ const insert=sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?)");
+ const date=Date.UTC(2026,0,8);
+ const history=(id,key,units) => insert.run(owner+"|"+key,owner,key,id,date,
+  JSON.stringify({available:true,analyzed:true,scope:"Product",unitsSold:units,historyFrom:date,historyTo:date}),
+  JSON.stringify({history:[{date,units}]}));
+ try {
+  const initial=await replace("Lookup,Name\n101,Original name\n102,To remove\n103,Legacy card");
+  history("101","product:101|row:0",7);
+  history("102","product:102|row:0",4);
+  history("103","product:103|row:2",0);
+  const replacement=await replace("Lookup,Name\n104,New card\n00101,Changed name",initial);
+  assert.deepEqual(visible(replacement),[["104","New card",null],["101","Changed name",7]]);
+  assert.equal(sql.prepare("SELECT COUNT(*) AS count FROM market WHERE owner=?").get(owner).count,3);
+  assert.deepEqual((await data.queryCards(owner,{sort:"rowNo",direction:"asc"})).rows.map(row=>row.productId),["104","101"]);
+  const returned=await replace("Lookup,Name\n102,Returned\n103,Legacy returned\n104,Still new",replacement);
+  assert.deepEqual(visible(returned),[["102","Returned",4],["103","Legacy returned",0],["104","Still new",null]]);
+  assert.equal(sql.prepare("SELECT COUNT(*) AS count FROM market WHERE owner=?").get(owner).count,4);
+  assert.deepEqual(requests,[]);
+  globalThis.inventoryTestEnv.API_SH_API_KEY="fixture";
+  assert.deepEqual((await market.refreshPlan(owner,{mode:"missing"})).keys,["product:104|row:0"]);
+  assert.equal((await market.refreshPlan(owner,{mode:"all"})).groups,3);
+  assert(requests.every(path=>path==="/v1/account"));
+ } finally {
+  globalThis.fetch=fetchOriginal;
+  delete globalThis.inventoryTestEnv.API_SH_API_KEY;
+ }
+});
+
 test("Only sales quantities can be charged and dates filter the saved history, including old saved options and old refresh runs",async()=>{
  const realFetch=globalThis.fetch,paid=[];
  globalThis.inventoryTestEnv.API_SH_API_KEY="local-test-only-key";
@@ -259,7 +316,7 @@ test("Sales planning accounts for D1 row reads and pauses while inventory browsi
  sql.prepare("INSERT INTO refresh_read_budget(day,rows_read) VALUES (?,?) ON CONFLICT(day) DO UPDATE SET rows_read=excluded.rows_read").run(day,1999990);
  db.prepare = query => {
   const stmt = prepare(query);
-  if (query.startsWith("SELECT key,productId,skuId")) {
+  if (query.includes('AS "historyRange" FROM cards c')) {
    const all = stmt.all;
    stmt.all = async () => ({...await all(),meta:{rows_read:15}});
   }
