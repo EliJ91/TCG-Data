@@ -43,3 +43,7 @@ yarn-error.log*
 
 # OS metadata
 .DS_Store
+
+# Nested standalone Worker build state
+/cloudflare/.wrangler/
+/cloudflare/outputs/
