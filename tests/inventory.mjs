@@ -67,6 +67,33 @@ test("Rows with no name or quantity import and repeated updates retain row count
  const rows=(await data.queryCards(owner,{sort:'rowNo',direction:'asc'})).rows;
  assert.deepEqual(rows.map(row=>row['csv:Custom']),['changed']);
 });
+
+test("All view preferences restore from the database and concurrent device saves preserve unrelated settings",async()=>{
+ const realFetch=globalThis.fetch;
+ globalThis.fetch=async()=>{throw Error('Settings must not request market data');};
+ const db=globalThis.inventoryTestEnv.DB,prepare=db.prepare,queries=[];
+ db.prepare=query=>{queries.push(query);return prepare(query);};
+ try {
+  const currentView=domain.normalizeView({filters:{search:'Charizard',categories:{set:['Base Set']},numeric:[{field:'unitsSold',min:'5',max:'25'}],dateFrom:'2026-01-01',dateTo:'2026-03-01',freshness:'analyzed'},sort:'unitsSold',direction:'desc',page:2,pageSize:25,view:'custom',advanced:true,exportScope:'all',exportAnalysis:true});
+  const response=await data.savePreferences(owner,{settingsOnly:true,settings:{currentView,productIdColumn:'Lookup'}});
+  assert.deepEqual(Object.keys(response),['settings']);
+  assert(!queries.some(query=>/FROM cards|FROM market|FROM refresh_runs/i.test(query)),'Auto-saving must not scan inventory or market tables');
+  let restored=(await data.state(owner)).settings;
+  assert.deepEqual(restored.currentView,currentView);assert.equal(restored.productIdColumn,'Lookup');
+  await Promise.all([
+   data.savePreferences(owner,{settingsOnly:true,settings:{theme:'light'}}),
+   data.savePreferences(owner,{settingsOnly:true,settings:{visibleColumns:['unitsSold','csv:Lookup']}}),
+   data.savePreferences(owner,{settingsOnly:true,settings:{currentView:{...currentView,filters:{...domain.emptyFilters,search:'Pikachu'}}}}),
+  ]);
+  restored=(await data.state(owner)).settings;
+  assert.equal(restored.theme,'light');assert.deepEqual(restored.visibleColumns,['unitsSold','csv:Lookup']);
+  assert.equal(restored.currentView.filters.search,'Pikachu');assert.deepEqual(restored.currentView.filters.categories,{});
+  assert.deepEqual(restored.currentView.filters.numeric,[]);assert.equal(restored.productIdColumn,'Lookup');
+  await upload('Lookup,Custom\n123,after upload');
+  restored=(await data.state(owner)).settings;
+  assert.equal(restored.currentView.filters.search,'Pikachu');assert.equal(restored.productIdColumn,'Lookup');
+ } finally {db.prepare=prepare;globalThis.fetch=realFetch;}
+});
 test("Server removes duplicates across chunks and updates while retaining first-row values and cached sales",async()=>{
  const realFetch=globalThis.fetch;
  globalThis.fetch=async()=>{throw Error('An import must not request sales data');};

@@ -25,6 +25,7 @@ import {
   inventoryColumns,
   marketColumns,
   normalizeFilters,
+  normalizeView,
   csvColumnKey,
   defaults,
   emptyFilters,
@@ -79,6 +80,7 @@ async function api<T = any>(
   path: string,
   body?: unknown,
   signal?: AbortSignal,
+  keepalive = false,
 ): Promise<T> {
   const response = await apiFetch("/api/" + path, {
     method: body === undefined ? "GET" : "POST",
@@ -87,6 +89,7 @@ async function api<T = any>(
     body: body === undefined ? undefined : JSON.stringify(body),
     signal,
     cache: "no-store",
+    keepalive,
   });
   const result = (await response.json()) as RecordValue;
   if (!response.ok)
@@ -250,6 +253,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     >(null);
   const [settings, setSettings] = useState<Preferences>(defaults),
     [saving, setSaving] = useState(false);
+  const [preferencesReady, setPreferencesReady] = useState(false),
+    [dataRevision, setDataRevision] = useState(0);
   const [accountReport,setAccountReport]=useState<RecordValue|null>(null), [accountBusy,setAccountBusy]=useState(false), [productDraft,setProductDraft]=useState("");
   const [saveName, setSaveName] = useState(""),
     [dragColumn, setDragColumn] = useState<string | null>(null),
@@ -286,7 +291,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
     [search, setSearch] = useState("");
   const latest = useRef({ filters, sort, direction, meta });
-  const columnSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const settingsSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const savedView = useRef("");
   latest.current = { filters, sort, direction, meta };
   const hasInventory = !!meta?.filename;
   const columns = inventoryColumns(meta?.headers ?? []);
@@ -319,31 +325,62 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setSelected(new Set());
     setView("custom");
   };
+  const persistSettings = (patch: Partial<Preferences>) => {
+    const job = settingsSaveQueue.current.catch(() => {}).then(() =>
+      api<{settings: Preferences}>("preferences", {settings: patch, settingsOnly: true}, undefined, true),
+    ).then(data => {
+      setMeta(current => current ? {...current, settings: data.settings} : current);
+      return data.settings;
+    });
+    settingsSaveQueue.current = job;
+    return job;
+  };
   const loadMetadata = async () => {
     const data = await api<Metadata>("state");
     setMeta(data);
     if(data.connected) void api("account").then(usage=>setMeta(current=>current?{...current,usage}:current)).catch(problem=>setMeta(current=>current?{...current,usage:{...current.usage,accountError:problem.message}}:current));
     setSettings(data.settings);
     setFacets(await api("facets"));
+    setDataRevision(current => current + 1);
     if (data.refresh?.status === "running") setRefresh(data.refresh);
     return data;
   };
   useEffect(() => {
     let active = true;
     void loadMetadata()
-      .then(() => {
+      .then(async (data) => {
         if (!active) return;
-        try {
-          const saved = JSON.parse(
-            localStorage.getItem("sortswift-view") ?? "null",
-          );
-          if (saved) {
-            setFilters(normalizeFilters(saved.filters));
-            setSearch(saved.filters?.search ?? "");
-            setSort(saved.sort ?? "rowNo");
-            setDirection(saved.direction ?? "asc");
-          }
-        } catch {}
+        let restored = data.settings;
+        const migration: Partial<Preferences> = {};
+        // Import browser-only preferences once. The database wins on every
+        // later visit, including visits from a browser with an older cache.
+        if (!restored.currentView) {
+          let legacy = {};
+          try { legacy = JSON.parse(localStorage.getItem("sortswift-view") ?? "null") ?? {}; } catch {}
+          migration.currentView = normalizeView(legacy);
+        }
+        if (restored.productIdColumn === null) {
+          try { migration.productIdColumn = localStorage.getItem("sortswift-product-id-column") ?? ""; }
+          catch { migration.productIdColumn = ""; }
+        }
+        if (Object.keys(migration).length) restored = await persistSettings(migration);
+        if (!active) return;
+        const current = normalizeView(restored.currentView ?? {});
+        savedView.current = JSON.stringify(current);
+        current.page = Math.min(current.page, Math.max(1, Math.ceil(data.uniqueCards / current.pageSize)));
+        setSettings(restored);
+        setFilters(current.filters);
+        setSearch(current.filters.search);
+        setSort(current.sort);
+        setDirection(current.direction);
+        setPage(current.page);
+        setPageSize(current.pageSize);
+        setView(current.view);
+        setAdvanced(current.advanced);
+        setExportScope(current.exportScope);
+        setExportAnalysis(current.exportAnalysis);
+        setPreferencesReady(true);
+        try { localStorage.removeItem("sortswift-view"); localStorage.removeItem("sortswift-product-id-column"); } catch {}
       })
       .catch(showError)
       .finally(() => {
@@ -354,7 +391,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     };
   }, []);
   useEffect(() => {
-    if (!meta) return;
+    if (!meta || !preferencesReady) return;
     const controller = new AbortController();
     setLoading(true);
     void api<Result>(
@@ -369,13 +406,31 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       .finally(() => {
         if (!controller.signal.aborted) setLoading(false);
       });
-    localStorage.setItem(
-      "sortswift-view",
-      JSON.stringify({ filters, sort, direction }),
-    );
     return () => controller.abort();
-  }, [meta, filters, sort, direction, page, pageSize]);
+  }, [preferencesReady, dataRevision, filters, sort, direction, page, pageSize]);
+  const currentView = JSON.stringify(normalizeView({filters, sort, direction: direction === "desc" ? "desc" : "asc", page, pageSize, view, advanced, exportScope: exportScope === "all" ? "all" : "filtered", exportAnalysis}));
   useEffect(() => {
+    if (!preferencesReady) return;
+    const save = () => {
+      if (savedView.current === currentView) return;
+      savedView.current = currentView;
+      void persistSettings({currentView: JSON.parse(currentView)}).catch(problem => {
+        savedView.current = "";
+        showError(problem);
+      });
+    };
+    const timer = setTimeout(save, 350);
+    const hidden = () => { if (document.visibilityState === "hidden") save(); };
+    window.addEventListener("pagehide", save);
+    document.addEventListener("visibilitychange", hidden);
+    return () => {
+      clearTimeout(timer);
+      window.removeEventListener("pagehide", save);
+      document.removeEventListener("visibilitychange", hidden);
+    };
+  }, [preferencesReady, currentView]);
+  useEffect(() => {
+    if (!preferencesReady) return;
     if (searchTimer.current) clearTimeout(searchTimer.current);
     searchTimer.current = setTimeout(() => {
       if (search !== latest.current.filters.search) {
@@ -386,24 +441,18 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     return () => {
       if (searchTimer.current) clearTimeout(searchTimer.current);
     };
-  }, [search]);
-  const updateSettings = async (next: Preferences, extra?: RecordValue) => {
-    const data = await api<Metadata>("preferences", {
-      settings: next,
-      ...extra,
-    });
-    setMeta(data);
-    setSettings(data.settings);
-    return data;
+  }, [search, preferencesReady]);
+  const updateSettings = async (next: Preferences) => {
+    const patch = Object.fromEntries(Object.entries(next).filter(([key,value]) => key !== "currentView" && key !== "productIdColumn" && JSON.stringify(value) !== JSON.stringify(meta?.settings[key as keyof Preferences]))) as Partial<Preferences>;
+    const restored = await persistSettings(patch);
+    setSettings(current => ({...current, ...Object.fromEntries(Object.keys(patch).map(key => [key, restored[key as keyof Preferences]]))}));
+    return restored;
   };
   const changeColumns = (visibleColumns: string[]) => {
     const next = {...settings, visibleColumns, columnSelectionVersion: 1};
     setSettings(next);
     // Serialize saves so rapid clicks cannot let an older selection win.
-    const job = columnSaveQueue.current.catch(() => {}).then(() => api<Metadata>("preferences", {
-      settings: {visibleColumns, columnSelectionVersion: 1, knownCsvColumns: next.knownCsvColumns},
-    })).then(data => setMeta(current => current ? {...current, settings: data.settings} : current));
-    columnSaveQueue.current = job;
+    const job = persistSettings({visibleColumns, columnSelectionVersion: 1, knownCsvColumns: next.knownCsvColumns});
     void job.catch(showError);
   };
   const chooseView = (value: string) => {
@@ -438,7 +487,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     try {
       const text = await input.text(),
         analysis = await runImportWorker(text, "analyze");
-      const savedIdColumn = localStorage.getItem("sortswift-product-id-column");
+      const savedIdColumn = settings.productIdColumn;
       if (savedIdColumn && analysis.headers.includes(savedIdColumn)) analysis.mapping.productId = savedIdColumn;
       setFile({ name: input.name, text, mode, ...analysis });
     } catch (problem) {
@@ -462,7 +511,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     try {
       const prepared: { headers: string[]; rows: ImportRow[]; duplicateCount: number } =
         await runImportWorker(file.text, "prepare", file.mapping);
-      localStorage.setItem("sortswift-product-id-column", file.mapping.productId);
+      const saved = await persistSettings({productIdColumn: file.mapping.productId});
+      setSettings(current => ({...current, productIdColumn: saved.productIdColumn}));
       const started = await api<{ id: string }>(
         "imports/start",
         {
@@ -506,6 +556,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       setSort("rowNo");
       setDirection("asc");
       setPage(1);
+      setView("all");
+      setDataRevision(current => current + 1);
       setNotice(
         "Inventory saved." + (prepared.duplicateCount ? " " + prepared.duplicateCount.toLocaleString() + " duplicate entries removed; the first row for each Product ID was kept." : "") + " Sales history is pulled only when you request it.",
       );
@@ -951,7 +1003,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   aria-label="Export inventory"
                   disabled={!hasInventory}
                   onClick={() => {
-                    setExportScope(selected.size ? "selected" : "filtered");
+                    setExportScope(selected.size ? "selected" : exportScope === "selected" ? "filtered" : exportScope);
                     setModal("export");
                   }}
                 >
@@ -1507,6 +1559,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           wide
         >
           <div className="modal-body settings-body">
+            <p className="small muted">Your settings, filters, sorting and columns are saved to your account and available on your other devices.</p>
             <section>
               <h3>Appearance</h3>
               <label>Theme<select value={settings.theme} onChange={e=>setSettings({...settings,theme:e.target.value as Preferences["theme"]})}><option value="dark">Black dark mode</option><option value="light">Light mode</option></select></label>
@@ -1655,7 +1708,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               disabled={saving || !settings.visibleColumns.length}
               onClick={() => {
                 setSaving(true);
-                void columnSaveQueue.current
+                void settingsSaveQueue.current
                   .then(() => setModal(null))
                   .catch(showError)
                   .finally(() => setSaving(false));

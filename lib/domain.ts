@@ -24,6 +24,8 @@ export type Filters = {
   limit: number;
 };
 export type Preferences = {
+  currentView: ViewPreferences | null;
+  productIdColumn: string | null;
   staleHours: number;
   autoMinutes: number;
   historyRange: "month" | "quarter" | "semi-annual" | "annual";
@@ -45,6 +47,8 @@ export type Preferences = {
 };
 export const defaultColumns = ["unitsSold", "scope", "historyFrom", "historyTo"];
 export const defaults: Preferences = {
+  currentView: null,
+  productIdColumn: null,
   staleHours: 24,
   autoMinutes: 0,
   historyRange: "annual",
@@ -69,6 +73,30 @@ export const emptyFilters: Filters = {
   dateTo: "",
   limit: 0,
 };
+export type ViewPreferences = {
+  filters: Filters;
+  sort: string;
+  direction: "asc" | "desc";
+  page: number;
+  pageSize: number;
+  view: string;
+  advanced: boolean;
+  exportScope: "all" | "filtered";
+  exportAnalysis: boolean;
+};
+export function normalizeView(value: Partial<ViewPreferences> = {}): ViewPreferences {
+  return {
+    filters: normalizeFilters(value.filters),
+    sort: typeof value.sort === "string" ? value.sort : "rowNo",
+    direction: value.direction === "desc" ? "desc" : "asc",
+    page: Number.isSafeInteger(value.page) && value.page! > 0 ? value.page! : 1,
+    pageSize: [25,50,100].includes(value.pageSize!) ? value.pageSize! : 50,
+    view: typeof value.view === "string" ? value.view : "all",
+    advanced: value.advanced === true,
+    exportScope: value.exportScope === "all" ? "all" : "filtered",
+    exportAnalysis: value.exportAnalysis === true,
+  };
+}
 export type Column = {
   key: string;
   label: string;
@@ -115,6 +143,8 @@ export function inventoryPreferences(p: Preferences, headers: string[]): Prefere
 }
 export function normalizePreferences(value: Partial<Preferences>): Preferences {
   const result: Preferences = { ...defaults, ...Object.fromEntries(Object.entries(value).filter(([key]) => key in defaults)) };
+  result.currentView = result.currentView && typeof result.currentView === "object" ? normalizeView(result.currentView) : null;
+  result.productIdColumn = typeof result.productIdColumn === "string" ? result.productIdColumn.slice(0,1000) : null;
   for (const field of [
     "staleHours",
     "autoMinutes",

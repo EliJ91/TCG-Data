@@ -114,7 +114,7 @@ export async function state(owner: string) {
 }
 export async function savePreferences(
   owner: string,
-  input: { settings?: Partial<Preferences>; key?: string; clearKey?: boolean },
+  input: { settings?: Partial<Preferences>; key?: string; clearKey?: boolean; settingsOnly?: boolean },
 ) {
   const space = await workspace(owner);
   const settings = normalizePreferences({
@@ -122,11 +122,19 @@ export async function savePreferences(
     ...input.settings,
   });
   if (input.key) throw new AppError("Configure API_SH_API_KEY on the backend; API keys are not accepted by this page.");
-  const secret = input.clearKey ? "" : space.secret;
+  // Replace only the requested fields atomically. A view save must not erase a
+  // simultaneous column/theme change from this device or another device.
+  const keys = Object.keys(input.settings ?? {}).filter(key => Object.hasOwn(settings,key)) as (keyof Preferences)[];
+  const args = keys.flatMap(key => ["$." + key, JSON.stringify(settings[key])]);
+  const expression = keys.length ? "json_set(settings," + keys.map(() => "?,json(?)").join(",") + ")" : "settings";
   await database()
-    .prepare("UPDATE workspaces SET settings=?,secret=? WHERE owner=?")
-    .bind(JSON.stringify(settings), secret, owner)
+    .prepare("UPDATE workspaces SET settings=" + expression + ",secret=CASE WHEN ? THEN '' ELSE secret END WHERE owner=?")
+    .bind(...args, input.clearKey ? 1 : 0, owner)
     .run();
+  if(input.settingsOnly){
+    const saved=await database().prepare("SELECT * FROM workspaces WHERE owner=?").bind(owner).first<Workspace>();
+    return {settings:preferences(saved!)};
+  }
   return state(owner);
 }
 export async function startImport(

@@ -20,6 +20,8 @@ The table shows original CSV columns followed by market columns. Column selectio
 
 Imported CDN image links display as 64 × 90 px thumbnails without cropping. Clicking a thumbnail opens its original image. Images load lazily and use no API.SH credits; CSV exports keep the original URL values.
 
+All account preferences are stored in the existing D1 workspace record, including the current search, filters, sales dates, sorting, page size, expanded filters, export options, theme, columns, saved views and remembered Product ID column. Each device loads the database settings after sign-in. Older browser-only views and ID-column preferences migrate once; stale local values never override an existing database preference. Rapid view edits are combined into a single lightweight save, also flushed when the page is hidden. Preference saves replace only the changed fields atomically, so unrelated saves do not erase each other. They do not scan the inventory or call API.SH. Browser theme storage is only a first-paint cache; authentication tokens remain in per-tab session storage.
+
 Only the explicit **Pull Sales History** action starts a lookup after the credit estimate. It retrieves full available history for the inventory, or the explicitly selected rows, independently of the table's date filter. There are no period or extra-data selections before pulling.
 
 The table appends quantities sold, sales coverage and available history dates. It has no generated price, fee, profitability, valuation or listing metrics. Original CSV columns remain intact. Product-only rows combine counts across all returned variants; legacy SKU rows match their exact variant.
