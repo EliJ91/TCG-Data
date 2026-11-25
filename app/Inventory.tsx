@@ -1,6 +1,6 @@
 "use client";
-import { useEffect, useRef, useState, type ReactNode } from "react";
-import dynamic from "next/dynamic";
+import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
+import { apiFetch, appHome } from "../lib/client-api";
 import {
   Layers3,
   Upload,
@@ -33,7 +33,7 @@ import {
 import { importFields, type Mapping } from "../lib/csv";
 import ImportWorker from "../lib/import.worker?worker";
 
-const HistoryChart = dynamic(() => import("./HistoryChart"), { ssr: false });
+const HistoryChart = lazy(() => import("./HistoryChart"));
 type RecordValue = Record<string, any>;
 type Metadata = {
   filename: string | null;
@@ -78,7 +78,7 @@ async function api<T = any>(
   body?: unknown,
   signal?: AbortSignal,
 ): Promise<T> {
-  const response = await fetch("/api/" + path, {
+  const response = await apiFetch("/api/" + path, {
     method: body === undefined ? "GET" : "POST",
     headers:
       body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -238,7 +238,7 @@ const dateLabel = (value: number | null | undefined) =>
       })
     : "Never";
 
-export default function Inventory() {
+export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const [meta, setMeta] = useState<Metadata | null>(null),
     [result, setResult] = useState<Result>(initialResult);
   const [filters, setFilters] = useState<Filters>(emptyFilters),
@@ -635,7 +635,7 @@ export default function Inventory() {
     setSaving(true);
     setError("");
     try {
-      const response = await fetch("/api/export", {
+      const response = await apiFetch("/api/export", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -696,7 +696,7 @@ export default function Inventory() {
   return (
     <div className="app-shell">
       <header className="topbar">
-        <a className="brand" href="/">
+        <a className="brand" href={appHome()}>
           <span className="brand-icon">
             <Layers3 size={22} />
           </span>
@@ -708,6 +708,7 @@ export default function Inventory() {
           <button className="button subtle credit-balance" onClick={()=>{setError("");setModal("account");}} title="View account usage and free credit reset">
             {meta?.usage?.available!==undefined ? Number(meta.usage.available).toLocaleString()+" free credits available" : "Free credits · not connected"}
           </button>
+          {onSignOut && <button className="button subtle" onClick={onSignOut}>Sign out</button>}
           <span className="connection">
             <i className={meta?.connected ? "connected" : ""} />
             {meta?.connected
@@ -2190,10 +2191,10 @@ export default function Inventory() {
                         Sale price ranges
                       </button>
                     </div>
-                    <HistoryChart
+                    <Suspense fallback={<p className="muted">Loading chart…</p>}><HistoryChart
                       history={card.detail.history ?? []}
                       type={historyType}
-                    />
+                    /></Suspense>
                     <p className="small muted">
                       History uses {card.detail.granularity ?? "source"} buckets. {card.detail.coveredDays ?? 0} completed daily buckets are available in the latest 30-day window. Missing totals remain N/A.
                     </p>

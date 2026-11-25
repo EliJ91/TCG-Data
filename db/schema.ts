@@ -130,3 +130,10 @@ export const apiRequests = sqliteTable("api_requests", {
   requestId: text("request_id"),
   metadata: text("metadata").notNull().default("{}"),
 }, (t) => [index("requests_owner_date").on(t.owner,t.createdAt)]);
+
+export const authCodes = sqliteTable("auth_codes", {
+  id: text("id").primaryKey(),
+  owner: text("owner").notNull(),
+  challenge: text("challenge").notNull(),
+  expiresAt: integer("expires_at").notNull(),
+});

@@ -1,6 +1,6 @@
 # SortSwift Market
 
-Private React/Vinext inventory workbench with persistent Cloudflare D1 storage. Original CSV values remain separate from retrieved market data. The app supports large imports, updates, replacement, search, filters, configurable columns, scoring and exports.
+React inventory workbench with persistent Cloudflare D1 storage, a GitHub Pages front end, and a dedicated Cloudflare Worker backend. The original Vinext entry remains available during migration. Original CSV values remain separate from retrieved market data. The app supports large imports, updates, replacement, search, filters, configurable columns, scoring and exports.
 
 ## API.SH configuration
 
@@ -18,9 +18,29 @@ A seller CSV's `TCGplayer Id` is a SKU, not a Product ID. Include an explicit Pr
 
 Monthly history is daily; longer history is weekly. Exact rolling totals require every completed UTC daily bucket in the period. Missing buckets are unknown, never zero. Average units per day uses reported completed daily buckets only. Weekly data is never presented as exact daily sales. Listing/seller samples are not total supply.
 
-## Development
+## Hosting and privacy
 
-`npm run dev`, `npx tsc --noEmit`, `node --test tests/core.mjs tests/credits.mjs`, `node tests/api-smoke.mjs` (local preview only), then the Sites build helper. New D1 tables are added through migration 0002; historical migrations remain unchanged.
+The GitHub Pages build contains client code only. Its sole hosting variable, `VITE_API_URL`, is the public backend URL. Never put API keys, OAuth client secrets or session-signing secrets in a `VITE_` variable, an Actions build artifact, or source control.
+
+Production backend: `https://tcg-data-api.ejjernigan.workers.dev`. Cloudflare runtime secrets are `API_SH_API_KEY`, `SESSION_SECRET`, `GITHUB_CLIENT_ID`, and `GITHUB_CLIENT_SECRET`. GitHub OAuth callback: `/auth/callback` on that backend. No repository scopes are requested. The backend accepts only the configured numeric GitHub owner ID; signing in with another account does not grant inventory access.
+
+OAuth uses state cookies and PKCE. The frontend receives a one-use, 60-second authorization code bound to its browser verifier, exchanges it for an eight-hour signed session, and keeps that session in tab storage. API routes require that session and reject other web origins. Original API secrets never reach the browser. Public website code does not contain uploaded inventory or cached market responses.
+
+Workers Free was verified before setup. This app uses Workers and D1 only; no R2, paid Worker plan, paid storage, cron job, AI service, or automatic upgrade is configured. Logs and traces are disabled. Free account limits are shared with other Workers. Reaching a free quota stops operations; it does not switch this app to a paid plan. Future account upgrades or provider pricing changes can change these conditions. The `FREE_ONLY` flag is an application deployment guard, not a substitute for keeping the Cloudflare account on its verified Free plan.
+
+D1 Free limits include 5 million rows read and 100,000 rows written per UTC day, including index writes. Large inventory imports may exceed the daily write quota. Imports are staged so an interrupted or failed import does not replace the previous active inventory. The local 50,050-card test validates correctness; it is not a guarantee that the same workload fits within production's free daily quota.
+
+## Build and deployment
+
+- `npm run build:backend` generates the schema bootstrap from migrations and builds the standalone Worker.
+- `npm run build:pages` builds `dist/pages`. Set `VITE_API_URL` to the backend URL only.
+- `npx tsc --noEmit` and `node --test tests/core.mjs tests/credits.mjs tests/auth.mjs tests/cloudflare-auth.mjs` validate types, credits, authentication, and data normalization.
+- `npm run dev:pages` opens the local static frontend on port 5188.
+- `wrangler dev --config cloudflare/wrangler.jsonc --local` runs a separate local backend. Local `.dev.vars` files are ignored by Git.
+- `TEST_BACKEND=cloudflare TEST_ORIGIN=http://127.0.0.1:8787 node tests/api-smoke.mjs` checks large imports against the local backend only. It refuses production hosts and non-test inventories.
+- Deploy the backend with `wrangler deploy --config cloudflare/wrangler.jsonc` after building. This command preserves server secrets.
+
+GitHub's `CLOUDFLARE_API_URL` repository variable supplies the public URL to the Pages workflow. The workflow deliberately skips private repositories on this GitHub Free setup. Publishing requires the owner's approval to make repository source public. No API.SH secret is needed in GitHub Actions. Existing Sites hosting is retained until the replacement sign-in and GitHub Pages deployment are verified; do not remove the working site before then.
 
 ## Provider references
 

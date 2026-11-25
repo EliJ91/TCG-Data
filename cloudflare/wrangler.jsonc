@@ -1,0 +1,22 @@
+{
+  "name":"tcg-data-api",
+  "main":"worker.ts",
+  "account_id":"8ac7c09a5e56fabf956c03472a52d337",
+  "compatibility_date":"2026-05-15",
+  "compatibility_flags":["nodejs_compat"],
+  "workers_dev":true,
+  "preview_urls":false,
+  "vars":{
+    "FRONTEND_URL":"https://elij91.github.io/TCG-Data/",
+    "OWNER_GITHUB_ID":"59631669",
+    "FREE_ONLY":"true"
+  },
+  "d1_databases":[{
+    "binding":"DB",
+    "database_name":"tcg-data",
+    "database_id":"1e6bdba6-46af-409e-80b3-d23db65d27dd",
+    "migrations_dir":"../drizzle"
+  }],
+  "observability":{"enabled":false},
+  "logpush":false
+}

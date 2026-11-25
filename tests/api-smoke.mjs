@@ -5,20 +5,25 @@ assert(
   ["127.0.0.1", "localhost"].includes(new URL(origin).hostname),
   "This fixture test runs only against a local preview.",
 );
-const signin = await fetch(origin + "/signin-with-chatgpt?return_to=/", {
-  redirect: "manual",
-});
-const cookie = signin.headers
-  .getSetCookie()
-  .map((value) => value.split(";")[0])
-  .join("; ");
-assert(cookie, "The local mock sign-in must return a cookie.");
+let cookie="",authorization="";
+if(process.env.TEST_BACKEND==="cloudflare"){
+ const encode=bytes=>Buffer.from(bytes).toString("base64url");
+ const payload=encode(JSON.stringify({kind:"session",owner:"59631669",exp:Date.now()+3600000}));
+ const key=await crypto.subtle.importKey("raw",new TextEncoder().encode("local-test-signing-secret-not-for-production"),{name:"HMAC",hash:"SHA-256"},false,["sign"]);
+ authorization="Bearer "+payload+"."+encode(await crypto.subtle.sign("HMAC",key,new TextEncoder().encode(payload)));
+}else{
+ const signin=await fetch(origin+"/signin-with-chatgpt?return_to=/",{redirect:"manual"});
+ cookie=signin.headers.getSetCookie().map(value=>value.split(";")[0]).join("; ");
+ assert(cookie,"The local mock sign-in must return a cookie.");
+}
+const testOrigin=process.env.TEST_BACKEND==="cloudflare"?"https://elij91.github.io":origin;
 async function api(path, body) {
   const response = await fetch(origin + "/api/" + path, {
     method: body === undefined ? "GET" : "POST",
     headers: {
       Cookie: cookie,
-      Origin: origin,
+      ...(authorization?{Authorization:authorization}:{}),
+      Origin: testOrigin,
       ...(body === undefined ? {} : { "Content-Type": "application/json" }),
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -131,7 +136,8 @@ const disconnected = await fetch(origin + "/api/market/start", {
   method: "POST",
   headers: {
     Cookie: cookie,
-    Origin: origin,
+      ...(authorization?{Authorization:authorization}:{}),
+    Origin: testOrigin,
     "Content-Type": "application/json",
   },
   body: "{}",
@@ -141,7 +147,8 @@ const original = await fetch(origin + "/api/export", {
   method: "POST",
   headers: {
     Cookie: cookie,
-    Origin: origin,
+      ...(authorization?{Authorization:authorization}:{}),
+    Origin: testOrigin,
     "Content-Type": "application/json",
   },
   body: JSON.stringify({ selected: [rows[0].info.key] }),
@@ -172,7 +179,8 @@ const rejected = await fetch(origin + "/api/imports/chunk", {
   method: "POST",
   headers: {
     Cookie: cookie,
-    Origin: origin,
+      ...(authorization?{Authorization:authorization}:{}),
+    Origin: testOrigin,
     "Content-Type": "application/json",
   },
   body: JSON.stringify({ id: invalid.id, start: 0, rows: [bad] }),
