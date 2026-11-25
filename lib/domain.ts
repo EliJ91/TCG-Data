@@ -72,7 +72,7 @@ export const emptyFilters: Filters = {
 export type Column = {
   key: string;
   label: string;
-  kind: "text" | "number" | "date";
+  kind: "text" | "number" | "date" | "salesDate";
   note?: string;
 };
 export const columns: Column[] = [
@@ -88,8 +88,8 @@ export const columns: Column[] = [
   { key: "quantity", label: "Owned", kind: "number" },
   {key: "unitsSold", label: "Units sold", kind: "number", note: "Reported quantities in the selected sales dates. Weekly totals are not split into individual days."},
   {key: "scope", label: "Sales coverage", kind: "text"},
-  {key: "historyFrom", label: "History starts", kind: "date"},
-  {key: "historyTo", label: "History ends", kind: "date"},
+  {key: "historyFrom", label: "History starts", kind: "salesDate"},
+  {key: "historyTo", label: "History ends", kind: "salesDate"},
   {key: "fetchedAt", label: "Sales history updated", kind: "date"},
 ];
 export const csvColumnKey = (header: string) => "csv:" + header;
@@ -159,11 +159,12 @@ export function formatValue(value: unknown, kind: Column["kind"]) {
     (typeof value === "number" && !Number.isFinite(value))
   )
     return "N/A";
-  if (kind === "date")
+  if (kind === "date" || kind === "salesDate")
     return new Date(Number(value)).toLocaleDateString(undefined, {
       month: "short",
       day: "numeric",
       year: "numeric",
+      timeZone: kind === "salesDate" ? "UTC" : undefined,
     });
   if (kind === "number") return Number(value).toLocaleString(undefined, {maximumFractionDigits: 0});
   return String(value);
