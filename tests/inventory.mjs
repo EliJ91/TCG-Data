@@ -428,3 +428,31 @@ test("Untagged CSV rows and inclusive price, quantity and sales ranges match on 
  assert.deepEqual(saved.settings.currentView.filters.numeric,filters.numeric);
  assert.deepEqual(saved.settings.currentView.filters.categories,filters.categories);
 });
+
+test("Views omit rows with no displayed values before counting, paging, or exporting", async () => {
+ const oldIds = Array.from({length:28},(_,index)=>String(90000+index));
+ await upload(["Lookup,Old Title",...oldIds.map(id=>id+",Original record "+id)].join("\n"));
+ await upload("Lookup,New Title,Quantity,Tags\n91001,Current record,1,\n91002,N/A, \t,\n91003,,0,","update");
+ const meta = await sync.syncMetadata(owner,null);
+ const snapshot = await sync.syncInventory(owner,new URLSearchParams({version:meta.version}));
+ const entries = local.indexInventory(snapshot.rows);
+ const filters = {...domain.emptyFilters,categories:{"csv:Tags":[""]}};
+ const input = {filters,displayColumns:["csv:New Title","csv:Quantity","csv:Tags","unitsSold"],page:2,pageSize:25};
+ const expected = ["91001","91003"];
+ const collect = rows=>rows.map(row=>row["csv:Lookup"]).sort();
+ for (const result of [local.queryLocalInventory(entries,input,24),await data.queryCards(owner,input)]) {
+  assert.equal(result.matches,2);
+  assert.equal(result.page,1);
+  assert.deepEqual(collect(result.rows),expected);
+ }
+ const localCsv = await local.localExport(entries,input,meta.headers,24,false).text();
+ const remoteCsv = await (await data.exportInventory(owner,input)).text();
+ assert.deepEqual(csv.parseCSV(localCsv),csv.parseCSV(remoteCsv));
+ assert.deepEqual(csv.parseCSV(remoteCsv).records.map(row=>row[0]).sort(),expected);
+ const oldView = {filters,displayColumns:["csv:Old Title"],pageSize:50};
+ assert.deepEqual(collect(local.queryLocalInventory(entries,oldView,24).rows),oldIds);
+ assert.deepEqual(collect((await data.queryCards(owner,oldView)).rows),oldIds);
+ assert.equal((await data.state(owner)).uniqueCards,31);
+ const allCsv = await (await data.exportInventory(owner,{})).text();
+ assert.equal(csv.parseCSV(allCsv).records.length,31);
+});

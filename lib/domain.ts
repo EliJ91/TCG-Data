@@ -20,6 +20,10 @@ export function isTagsColumn(key: string) {
 export function isBlankCategory(value: unknown) {
   return value == null || typeof value === "string" && value.trim() === "";
 }
+export function hasDisplayValue(value: unknown) {
+  if (typeof value === "number") return Number.isFinite(value);
+  return !isBlankCategory(value) && (typeof value !== "string" || value.trim().toUpperCase() !== "N/A");
+}
 export function isNumericFilterColumn(key: string) {
   if (key === "unitsSold" || key === "quantity") return true;
   if (!key.startsWith("csv:")) return false;

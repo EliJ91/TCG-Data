@@ -398,12 +398,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       .then(setServerFacets).catch(problem=>{ if (!controller.signal.aborted) setError(problem.message); });
     return () => controller.abort();
   }, [advanced, localEntries, hasInventory, facetKeys, filters.dateFrom, filters.dateTo, dataRevision]);
-  const query = { filters, sort, direction, page, pageSize };
+  const displayColumnKeys = JSON.stringify(visible.map(column=>column.key).sort());
+  const displayColumns = useMemo(() => JSON.parse(displayColumnKeys) as string[], [displayColumnKeys]);
+  useEffect(() => { setSelected(current=>current.size ? new Set() : current); }, [displayColumns]);
+  const query = { filters, sort, direction, page, pageSize, displayColumns };
   const scopeQuery = (choice: string) => ({
     filters: choice === "all" || choice === "selected" ? emptyFilters : filters,
     sort,
     direction,
     ...(choice === "selected" ? { selected: [...selected] } : {}),
+    ...(choice !== "all" ? {displayColumns} : {}),
   });
   const refreshOptions={prioritizeUnanalyzed:settings.prioritizeUnanalyzed,maxProducts:settings.maxProducts};
   const showError = (problem: unknown) =>
@@ -510,8 +514,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   }, []);
   useEffect(() => {
     if (!meta || !preferencesReady) return;
+    const showResult = (next:Result) => {
+      setResult(next);
+      if (next.page !== page) setPage(next.page);
+    };
     if (localEntries) {
-      try { setResult(queryLocalInventory(localEntries,query,settings.staleHours)); }
+      try { showResult(queryLocalInventory(localEntries,query,settings.staleHours)); }
       catch (problem) { showError(problem); }
       setLoading(false);
       return;
@@ -523,7 +531,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       undefined,
       controller.signal,
     )
-      .then(setResult)
+      .then(next=>{ if (!controller.signal.aborted) showResult(next); })
       .catch((problem) => {
         if (problem.name !== "AbortError") showError(problem);
       })
@@ -531,7 +539,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [preferencesReady, dataRevision, localEntries, filters, sort, direction, page, pageSize, settings.staleHours]);
+  }, [preferencesReady, dataRevision, localEntries, filters, sort, direction, page, pageSize, settings.staleHours, displayColumns]);
   const currentView = JSON.stringify(normalizeView({filters, sort, direction: direction === "desc" ? "desc" : "asc", page, pageSize, view, advanced, exportScope: exportScope === "all" ? "all" : "filtered", exportAnalysis}));
   useEffect(() => {
     if (!preferencesReady) return;

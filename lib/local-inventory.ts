@@ -1,4 +1,4 @@
-import { columns, csvColumnKey, inventoryColumns, isCategoryValue, isBlankCategory, isNumericFilterColumn, isTagsColumn, numericFilterValue, type CategoryValue, type Filters, type Preferences } from "./domain";
+import { columns, csvColumnKey, inventoryColumns, hasDisplayValue, isCategoryValue, isBlankCategory, isNumericFilterColumn, isTagsColumn, numericFilterValue, type CategoryValue, type Filters, type Preferences } from "./domain";
 import { csvCell } from "./csv";
 
 export type SyncCard = {
@@ -19,7 +19,7 @@ export type SyncEvent = Pick<SyncCard,"marketProduct"|"mappedProduct"|"data"|"de
   seq: number; kind: "market"|"sku"; subject: string;
 };
 type Item = Record<string, any>;
-type Input = {filters?: Filters; sort?: string; direction?: string; selected?: string[]; page?: number; pageSize?: number};
+type Input = {filters?: Filters; sort?: string; direction?: string; selected?: string[]; displayColumns?: string[]; page?: number; pageSize?: number};
 
 export function inventoryIdentity(card: SyncCard) {
   const info = JSON.parse(card.info);
@@ -127,6 +127,7 @@ function selectRows(entries: Entry[], input: Input, staleHours: number) {
         f?.freshness === "fresh" && (row.fetchedAt == null || row.fetchedAt < freshAfter || !!market.partial) ||
         f?.freshness === "outdated" && !(row.fetchedAt != null && row.fetchedAt < freshAfter || market.partial)) continue;
     const projected = rowWithSalesWindow(entry,from,to);
+    if (input.displayColumns?.length && !input.displayColumns.some(key=>hasDisplayValue(projected[key]))) continue;
     if (salesCategories.some(([key,values])=>!values.has(projected[key]))) continue;
     if (ranges.some(({field,min,max}) => {
       const value = numericFilterValue(projected[field]);
@@ -144,7 +145,9 @@ function selectRows(entries: Entry[], input: Input, staleHours: number) {
 }
 
 export function queryLocalInventory(entries: Entry[], input: Input, staleHours: number) {
-  const rows = selectRows(entries,input,staleHours), page = input.page ?? 1, pageSize = input.pageSize ?? 50;
+  const rows = selectRows(entries,input,staleHours), pageSize = input.pageSize ?? 50;
+  const requested = input.page ?? 1;
+  const page = input.displayColumns?.length ? Math.min(requested,Math.max(1,Math.ceil(rows.length/pageSize))) : requested;
   return {
     rows: rows.slice((page-1)*pageSize,page*pageSize).map(entry=>entry.row),
     page, pageSize, matches:rows.length, units:rows.reduce((sum,{row})=>sum+row.quantity,0),

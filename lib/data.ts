@@ -416,6 +416,7 @@ export type QueryInput = {
   page?: number;
   pageSize?: number;
   selected?: string[];
+  displayColumns?: string[];
 };
 export function buildQuery(owner: string, space: Workspace, input: QueryInput, forCount = false) {
   const p = preferences(space),
@@ -435,6 +436,18 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
 
   const values: unknown[] = [owner, space.active_version ?? ""],
     where = ["c.owner=?", "c.version=?"];
+  if (Array.isArray(input.displayColumns)) {
+    const displayed = [...new Set(input.displayColumns)].filter(key=>key!=="rowNo" && Object.hasOwn(e,key));
+    const hasValue = (expression: string) =>
+      "UPPER(COALESCE(TRIM(CAST("+expression+" AS TEXT),"+sqlWhitespace+"),'')) NOT IN ('','N/A')";
+    const checks = displayed.filter(key=>!key.startsWith("csv:")).map(key=>hasValue(e[key]));
+    const csvHeaders = displayed.filter(key=>key.startsWith("csv:")).map(key=>key.slice(4));
+    if (csvHeaders.length) {
+      checks.unshift("EXISTS (SELECT 1 FROM json_each(r.raw) cell WHERE cell.key IN (SELECT value FROM json_each(?)) AND "+hasValue("cell.value")+")");
+      values.push(JSON.stringify(csvHeaders));
+    }
+    if (checks.length) where.push("(" + checks.join(" OR ") + ")");
+  }
   if (f?.search?.trim()) {
     const search = "%" + f.search.trim().replace(/[\\%_]/g, "\\$&") + "%";
     where.push(
@@ -513,7 +526,7 @@ export async function queryCards(owner: string, input: QueryInput) {
   const space = await workspace(owner),
     query = buildQuery(owner, space, input),
     db = database();
-  const page = Math.max(1, Math.floor(Number(input.page) || 1)),
+  const requested = Math.max(1, Math.floor(Number(input.page) || 1)),
     pageSize = [25, 50, 100].includes(Number(input.pageSize))
       ? Number(input.pageSize)
       : 50;
@@ -526,6 +539,7 @@ export async function queryCards(owner: string, input: QueryInput) {
     )
     .bind(...countQuery.values)
     .first();
+  const page = input.displayColumns?.length ? Math.min(requested,Math.max(1,Math.ceil(Number(total?.matches??0)/pageSize))) : requested;
   const rows = await db
     .prepare("SELECT * FROM (" + query.sql + ") LIMIT ? OFFSET ?")
     .bind(...query.values, pageSize, (page - 1) * pageSize)
