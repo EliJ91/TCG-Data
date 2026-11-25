@@ -18,7 +18,10 @@ import {
   startRefresh,
   refreshStep,
   cancelRefresh,
+  recoverResult,
+  linkProduct,
 } from "../../../lib/market";
+import { syncAccount, accountDetails } from "../../../lib/credits";
 export const dynamic = "force-dynamic";
 type Context = { params: Promise<{ path: string[] }> };
 async function handle(request: Request, context: Context) {
@@ -45,6 +48,8 @@ async function handle(request: Request, context: Context) {
         return Response.json(await commitImport(owner, body.id));
       if (path === "imports/cancel")
         return Response.json(await cancelImport(owner, body.id));
+      if (path === "market/recover") return Response.json(await recoverResult(owner,body.id));
+      if (path === "market/product") return Response.json(await linkProduct(owner,body.key,String(body.productId??"")));
       if (path === "market/plan")
         return Response.json(await refreshPlan(owner, body));
       if (path === "market/start")
@@ -55,6 +60,8 @@ async function handle(request: Request, context: Context) {
         return Response.json(await cancelRefresh(owner, body.id));
       if (path === "export") return exportInventory(owner, body);
     } else {
+      if (path === "account") return Response.json(await syncAccount(owner),{headers:{"Cache-Control":"no-store"}});
+      if (path === "account/details") return Response.json(await accountDetails(owner),{headers:{"Cache-Control":"no-store"}});
       if (path === "state")
         return Response.json(await state(owner), {
           headers: { "Cache-Control": "no-store" },

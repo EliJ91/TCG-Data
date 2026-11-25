@@ -24,14 +24,7 @@ function moduleUrl(path, replacements = {}) {
 }
 const domain = moduleUrl("../lib/domain.ts");
 const csv = await import(moduleUrl("../lib/csv.ts", { "./domain": domain }));
-const stub =
-  "data:text/javascript;base64," +
-  Buffer.from(
-    "export class AppError extends Error{constructor(message,status){super(message);this.status=status;}};export const apiKey=()=>{},buildQuery=()=>{},preferences=()=>{},workspace=()=>{};export const database=()=>({prepare(){return{bind(){return this},async first(){return{status:'running'}},async run(){return{meta:{changes:1}}}}}});",
-  ).toString("base64");
-const { normalizeMarket, provider } = await import(
-  moduleUrl("../lib/market.ts", { "./domain": domain, "./data": stub })
-);
+const {normalizeMarket,accountSnapshot,chargedCredits,DAY}=await import(moduleUrl("../lib/api-sh.ts"));
 
 test("CSV IDs stay SKUs and quoted original values survive parsing", () => {
   const input =
@@ -72,192 +65,49 @@ test("CSV preparation supports more than fifty thousand cards", () => {
     ).join("\n");
   assert.equal(csv.prepareImport(input).rows.length, 50001);
 });
-const info = {
-  key: "sku:77",
-  skuId: "77",
-  productId: "123",
-  name: "Documented shape fixture",
-  number: "1",
-  set: "Fixture",
-  rarity: "",
-  condition: "Near Mint",
-  printing: "Holofoil",
-  language: "EN",
-  quantity: 1,
-  originalPrice: null,
-};
-const product = {
-  productId: 123,
-  skus: [
-    {
-      skuId: 77,
-      productId: 123,
-      condName: "Near Mint",
-      condAbbr: "NM",
-      printingName: "Holofoil",
-      languageName: "English",
-      langAbbr: "EN",
-    },
-  ],
-};
-const ago = (days) => new Date(Date.now() - days * 86400000).toISOString();
-function payload(rows = []) {
-  return {
-    sku: {
-      data: {
-        skus: [
-          { skuId: 77, marketPrice: 0, lowPrice: 1.5, lowestListingPrice: 8 },
-        ],
-      },
-    },
-    archive: { data: { rows } },
-    recent: {
-      data: {
-        sales: [
-          {
-            date: ago(1),
-            condition: "Near Mint",
-            variant: "Holofoil",
-            price: 99,
-          },
-        ],
-        lastUpdated: "2026-11-24T00:00:00Z",
-      },
-    },
-  };
-}
-test("Exact SKU matching accepts documented language abbreviations and preserves zero prices", () => {
-  const result = normalizeMarket(info, product, payload(), true);
-  assert.equal(result.metrics.scope, "Exact SKU");
-  assert.equal(result.metrics.marketPrice, 0);
-  assert.equal(result.metrics.listingLow, 1.5);
-  assert.equal(result.metrics.units30, null);
-  assert.equal(result.metrics.lastSoldAt, null);
-  assert.equal(result.metrics.soldAverage, null);
-  assert.equal(result.detail.sources.recent.sourceUpdated, null);
-  assert.equal(
-    result.detail.sources.recent.processedAt,
-    "2026-11-24T00:00:00Z",
-  );
+
+const now=Date.parse("2026-11-24T19:00:00Z"),today=Date.parse("2026-11-24T00:00:00Z");
+const info={skuId:"77",condition:"Near Mint",printing:"Holofoil",language:"EN"};
+const points=Array.from({length:90},(_,i)=>({date:new Date(today-(90-i)*DAY).toISOString().slice(0,10),quantity_sold:2,transactions:1,market_price:10,low_sale:8,high_sale:12}));
+const fixture=(range="month")=>({product_id:123,range,currency:"USD",series:[{sku:77,condition:"Near Mint",printing:"Holofoil",language:"English",points}]});
+test("Monthly daily data produces exact complete UTC-day totals",()=>{
+ const {metrics,detail}=normalizeMarket(info,fixture(),{},now);
+ assert.equal(metrics.units7,14);assert.equal(metrics.units30,60);assert.equal(metrics.dailySales,2);assert.equal(metrics.transactions30,30);assert.equal(metrics.unitsPerTransaction,2);assert.equal(metrics.lowerBound,false);assert.equal(detail.coveredDays,30);
 });
-test("A conflicting inventory condition cannot receive another SKU's prices", () => {
-  const result = normalizeMarket(
-    { ...info, condition: "Lightly Played" },
-    product,
-    payload(),
-    true,
-  );
-  assert.equal(result.metrics.marketPrice, null);
-  assert.equal(result.metrics.scope, "Variant not matched");
+test("Weekly aggregates never become exact daily rates or rolling totals",()=>{
+ const {metrics}=normalizeMarket(info,fixture("quarter"),{},now);
+ for(const key of ["units7","units30","dailySales","transactions30","salesFrequency"])assert.equal(metrics[key],null,key);
+ assert.equal(metrics.marketPrice,10);
 });
-test("Units and transactions use whole buckets and the same coverage for their ratio", () => {
-  const rows = [
-    {
-      skuId: 77,
-      bucketStartDate: ago(6),
-      quantitySold: 12,
-      transactionCount: 4,
-      marketPrice: 2,
-    },
-    {
-      skuId: 77,
-      bucketStartDate: ago(2),
-      quantitySold: 100,
-      transactionCount: 1,
-      marketPrice: 3,
-    },
-    {
-      skuId: 77,
-      bucketStartDate: ago(12),
-      quantitySold: null,
-      transactionCount: 10,
-      marketPrice: 2,
-    },
-    {
-      skuId: 999,
-      bucketStartDate: ago(6),
-      quantitySold: 999,
-      transactionCount: 999,
-      marketPrice: 99,
-    },
-  ];
-  const result = normalizeMarket(info, product, payload(rows), true);
-  assert.equal(result.metrics.units7, 12);
-  assert.equal(result.metrics.units30, 12);
-  assert.equal(result.metrics.transactions30, 14);
-  assert.equal(result.metrics.unitsPerTransaction, 3);
-  assert.equal(result.metrics.dailySales, 4);
-  assert.equal(result.detail.coveredDays, 3);
+test("Missing daily buckets and unmatched variants stay unknown, not zero",()=>{
+ const data=fixture();data.series[0].points=points.slice(0,-1);
+ assert.equal(normalizeMarket(info,data,{},now).metrics.units7,null);
+ const unmatched=normalizeMarket({...info,condition:"Lightly Played"},fixture(),{},now).metrics;
+ assert.equal(unmatched.available,false);assert.equal(unmatched.units30,null);assert.equal(unmatched.marketPrice,null);
+ const empty=normalizeMarket(info,{product_id:123,range:"month",series:[]},{},now).metrics;
+ assert.equal(empty.units30,null);
 });
-test("Listing samples cannot become total marketplace supply", () => {
-  const data = payload();
-  data.listings = {
-    data: {
-      allListings: {
-        "Near Mint": {
-          Holofoil: {
-            standard: [
-              { listingId: 1, sellerName: "Fixture A", price: 2, quantity: 3 },
-              { listingId: 2, sellerName: "Fixture B", price: 4, quantity: 5 },
-            ],
-            custom: [],
-          },
-        },
-      },
-    },
-  };
-  const result = normalizeMarket(info, product, data, false);
-  assert.equal(result.metrics.sampleSupply, 8);
-  assert.equal(result.metrics.sampleSellers, 2);
-  assert.equal(result.metrics.listingMedian, 3);
-  assert.equal(result.metrics.totalSupply, null);
-  assert.equal(result.metrics.competingSellers, null);
-  assert.equal(result.metrics.demandSupply, null);
-  assert.equal(result.detail.completeArchive, false);
+test("Real zero daily buckets remain valid zero sales",()=>{
+ const data=fixture();data.series[0].points=points.map(p=>({...p,quantity_sold:0,transactions:0,market_price:0}));
+ const {metrics}=normalizeMarket(info,data,{},now);assert.equal(metrics.units30,0);assert.equal(metrics.marketPrice,0);
 });
-test("Exhausted allowance stops after one request instead of retrying every card", async () => {
-  const previous = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls++;
-    return new Response(
-      JSON.stringify({
-        success: false,
-        code: "INSUFFICIENT_ALLOWANCE",
-        remaining: 0,
-      }),
-      { status: 429, headers: { "Retry-After": "5" } },
-    );
-  };
-  try {
-    await assert.rejects(
-      () =>
-        provider("fixture", "run", "fixture-key", "/api/v2/products/123", 1),
-      (error) => error.status === 403,
-    );
-    assert.equal(calls, 1);
-  } finally {
-    globalThis.fetch = previous;
-  }
+test("Free bucket, UTC reset and fixed ceiling exclude purchased balance",()=>{
+ const body={account:{id:"account",status:"active"},credits:{free:3,total:5003,payg:5000,free_resets_at:"2026-12-01T00:00:00Z"},spend:{this_month:997,today:0,monthly_limit:1000,daily_limit:null,period:"UTC"}};
+ assert.equal(accountSnapshot(body,now).available,3);
+ assert.equal(accountSnapshot({...body,credits:{...body.credits,free:0}},now).available,0);
+ assert.equal(accountSnapshot({...body,spend:{...body.spend,period:"local"}},now).available,0);
+ assert.equal(accountSnapshot(body,Date.parse("2026-12-01T00:00:00Z")).available,0);
+ assert.equal(accountSnapshot({...body,spend:{...body.spend,this_month:1000}},now).available,0);
+ assert.equal(accountSnapshot({...body,credits:{total:5003,free_resets_at:body.credits.free_resets_at}},now).verified,false);
 });
-test("A long provider Retry-After stops the refresh instead of retrying too early", async () => {
-  const previous = globalThis.fetch;
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls++;
-    return new Response(
-      JSON.stringify({ success: false, code: "ALLOWANCE_IN_USE" }),
-      { status: 429, headers: { "Retry-After": "60" } },
-    );
-  };
-  try {
-    await assert.rejects(
-      () =>
-        provider("fixture", "run", "fixture-key", "/api/v2/products/123", 1),
-      (error) => error.status === 429,
-    );
-    assert.equal(calls, 1);
-  } finally {
-    globalThis.fetch = previous;
-  }
+test("Failed lookups count actual charges and combined remaining is never free allowance",()=>{
+ const h=new Headers({"x-credits-used":"1","x-credits-remaining":"5003","x-request-id":"id"});
+ assert.deepEqual(chargedCredits(h,{credits_used:1},1),{used:1,verified:true,combinedRemaining:5003,requestId:"id"});
+ assert.equal(chargedCredits(new Headers(),{},1).verified,false);
+ assert.equal(chargedCredits(new Headers({"x-credits-used":"0"}),{credits_used:1},1).used,1);
+});
+test("Listing samples are not total market supply or seller counts",()=>{
+ const extras={listings:{total:100,next_page:2,listings:[{sku:77,condition:"Near Mint",printing:"Holofoil",language:"English",price:4,quantity:2,seller:{key:"a"}}]}};
+ const {metrics}=normalizeMarket(info,fixture(),extras,now);
+ assert.equal(metrics.sampleSupply,2);assert.equal(metrics.sampleSellers,1);assert.equal(metrics.totalSupply,null);assert.equal(metrics.competingSellers,null);assert.equal(metrics.activeListings,null);
 });

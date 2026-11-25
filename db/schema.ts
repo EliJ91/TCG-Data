@@ -106,3 +106,27 @@ export const refreshTargets = sqliteTable("refresh_targets", {
   runId: text("run_id").notNull(),
   cardKey: text("card_key").notNull(),
 });
+
+export const creditAccounts = sqliteTable("credit_accounts", {
+  id: text("id").primaryKey(),
+  available: real("available").notNull().default(0),
+  reserved: real("reserved").notNull().default(0),
+  dirty: integer("dirty").notNull().default(1),
+  period: text("period").notNull().default(""),
+  snapshot: text("snapshot").notNull().default("{}"),
+  lockToken: text("lock_token"),
+  lockUntil: integer("lock_until").notNull().default(0),
+});
+export const apiRequests = sqliteTable("api_requests", {
+  id: text("id").primaryKey(),
+  owner: text("owner").notNull(),
+  accountId: text("account_id").notNull(),
+  runId: text("run_id"),
+  path: text("path").notNull(),
+  createdAt: integer("created_at").notNull(),
+  reserved: real("reserved").notNull(),
+  charged: real("charged"),
+  status: text("status").notNull(),
+  requestId: text("request_id"),
+  metadata: text("metadata").notNull().default("{}"),
+}, (t) => [index("requests_owner_date").on(t.owner,t.createdAt)]);

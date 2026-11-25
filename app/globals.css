@@ -198,7 +198,7 @@ progress::-moz-progress-bar {
   border: 1px solid #dce3de;
   border-radius: 6px;
   padding: 9px 13px;
-  background: white;
+  background: var(--surface);
   color: #37483d;
   font-size: 14px;
   font-weight: 500;
@@ -625,7 +625,7 @@ tbody tr:last-child td {
   padding: 16px 18px;
   border: 1px solid var(--line);
   border-radius: 8px;
-  background: white;
+  background: var(--surface);
   margin-bottom: 19px;
 }
 .refresh-progress > div {
@@ -770,7 +770,7 @@ tbody tr:last-child td {
   padding: 0;
   border: 1px solid #dce4de;
   border-radius: 12px;
-  background: white;
+  background: var(--surface);
   color: var(--ink);
   box-shadow: 0 24px 100px #0c291b33;
   overflow: auto;
@@ -791,7 +791,7 @@ tbody tr:last-child td {
   align-items: center;
   justify-content: space-between;
   gap: 15px;
-  background: white;
+  background: var(--surface);
   border-bottom: 1px solid var(--line);
 }
 .modal-heading h2 {
@@ -824,7 +824,7 @@ tbody tr:last-child td {
   gap: 8px;
   font-size: 13px;
 }
-.modal-body label:not(.check-label) > input,
+.modal-body label:not(.check-label) > input:not([type="radio"]):not([type="checkbox"]),
 .modal-body label > select {
   width: 100%;
 }
@@ -1158,7 +1158,7 @@ tbody tr:last-child td {
 .signin-card {
   max-width: 470px;
   padding: 38px;
-  background: white;
+  background: var(--surface);
   border: 1px solid var(--line);
   border-radius: 12px;
   box-shadow: var(--shadow);
@@ -1462,3 +1462,66 @@ tbody tr:last-child td {
   font-size: 13px;
   line-height: 1.8;
 }
+
+/* Neutral surfaces stay truly black in dark mode. */
+:root[data-theme="dark"] {
+  --background:#000; --surface:#000; --ink:#eee; --muted:#aaa;
+  --line:#303030; --green:#8ed5b3; --green-soft:#191919;
+  --danger:#ff9d96; --shadow:0 12px 45px #0009; color-scheme:dark;
+}
+:root[data-theme="dark"] .button,
+:root[data-theme="dark"] th,
+:root[data-theme="dark"] td,
+:root[data-theme="dark"] .card-name strong,
+:root[data-theme="dark"] .wordmark,
+:root[data-theme="dark"] h1,
+:root[data-theme="dark"] h2,
+:root[data-theme="dark"] h3 {color:var(--ink);border-color:var(--line)}
+:root[data-theme="dark"] input,
+:root[data-theme="dark"] select {border-color:var(--line)}
+:root[data-theme="dark"] .button.primary,
+:root[data-theme="dark"] .brand-icon {color:#000;background:var(--green)}
+:root[data-theme="dark"] .button.primary:hover:not(:disabled) {background:#a6e5c6}
+:root[data-theme="dark"] th,
+:root[data-theme="dark"] .modal-heading,
+:root[data-theme="dark"] .modal-footer,
+:root[data-theme="dark"] .estimate,
+:root[data-theme="dark"] .source-note,
+:root[data-theme="dark"] .score,
+:root[data-theme="dark"] .filter-count,
+:root[data-theme="dark"] .empty-icon,
+:root[data-theme="dark"] .chart-empty,
+:root[data-theme="dark"] .detail-metrics > div,
+:root[data-theme="dark"] .column-option,
+:root[data-theme="dark"] .column-option.visible,
+:root[data-theme="dark"] .import-preview,
+:root[data-theme="dark"] .selection-bar {background:#141414;color:var(--ink);border-color:var(--line)}
+:root[data-theme="dark"] .button:hover:not(:disabled),
+:root[data-theme="dark"] .icon-button:hover,
+:root[data-theme="dark"] tbody tr:hover td {background:#1c1c1c}
+:root[data-theme="dark"] .banner.error,
+:root[data-theme="dark"] .modal-error,
+:root[data-theme="dark"] .connection-note {background:#1b1111;color:#ffb2aa;border-color:#613631}
+:root[data-theme="dark"] .banner.notice {background:#141414;color:#b8e6cb;border-color:#383838}
+:root[data-theme="dark"] .score.strong {background:#1b1b1b;color:#a5dfb5}
+:root[data-theme="dark"] .score.medium {background:#202020;color:#e6d38e}
+:root[data-theme="dark"] .modal::backdrop {background:#000a}
+.coverage-line {display:flex;align-items:center;gap:10px;flex-wrap:wrap;color:var(--muted);font-size:14px;margin:-10px 0 20px}
+.coverage-line .text-button {font-size:14px}
+.refresh-options {margin:20px 0;display:grid;gap:14px}
+.refresh-options label {margin-top:12px}
+.account-details {display:grid;gap:18px}
+.account-details pre {background:var(--green-soft);padding:16px;border-radius:6px;overflow:auto;max-height:320px;font-size:13px;white-space:pre-wrap;overflow-wrap:anywhere}
+.request-row {display:flex;align-items:center;justify-content:space-between;gap:16px;padding:14px 0;border-bottom:1px solid var(--line);overflow-wrap:anywhere}
+.request-row code {font-size:12px}
+.credit-balance {font-variant-numeric:tabular-nums}
+@media(max-width:700px){.connection{display:none}.topbar-actions{gap:2px}.credit-balance{font-size:12px;white-space:normal;max-width:140px}.request-row{align-items:flex-start;flex-direction:column}}
+
+:root[data-theme="dark"] .filter-panel,
+:root[data-theme="dark"] .settings-body .data-notes,
+:root[data-theme="dark"] .file-summary,
+:root[data-theme="dark"] .empty-symbol {background:#141414;color:var(--ink);border-color:var(--line)}
+:root[data-theme="dark"] summary,
+:root[data-theme="dark"] .file-meta strong,
+:root[data-theme="dark"] .inventory-meta strong,
+:root[data-theme="dark"] .workspace-footer a {color:var(--muted)}

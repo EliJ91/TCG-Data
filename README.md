@@ -1,32 +1,33 @@
 # SortSwift Market
 
-Private inventory workbench using React, Vinext, and persistent Cloudflare D1 storage. Import SortSwift or TCGplayer CSVs, preserve original values, and fetch market data explicitly through a server-side TCGAPIs adapter.
+Private React/Vinext inventory workbench with persistent Cloudflare D1 storage. Original CSV values remain separate from retrieved market data. The app supports large imports, updates, replacement, search, filters, configurable columns, scoring and exports.
 
-## Use
+## API.SH configuration
 
-Upload a CSV once. Update CSV merges by marketplace SKU or product/condition/printing/language identity. Replace CSV validates the complete file before atomically replacing the active inventory. Imported and retrieved data are stored separately. CSV exports can preserve the original TCGplayer columns or export analysis fields.
+Configure the backend secret `API_SH_API_KEY`. It is never accepted from or returned to the browser. Existing encrypted TCGAPIs credentials are not reused. No paid data is requested on app load or import.
 
-Open Settings to connect a TCGAPIs key and set your seller fees, minimum price, scoring weights, and refresh preferences. Keys are AES-GCM encrypted in server storage and never returned to the client. Automatic refresh is off by default. Refresh estimates are displayed before an on-demand request.
+The existing provider monthly spending limit of 1,000 credits is never changed. The app reads `/v1/account`, `/v1/account/usage` and `/v1/account/logs` for free. Only `credits.free` is used as the free balance. Combined, plan and purchased balances are excluded. Provider `free_resets_at` and UTC spending information determine resets. A separate app ceiling never exceeds 1,000 monthly credits.
 
-## Data definitions
+Every on-demand refresh shows an estimate. Default request: `/tcgplayer/v1/price-history?id=PRODUCT_ID&range=month`, one credit per product, including all variants. Users may explicitly choose quarterly, semiannual or annual history. Optional SKU pricing adds one product request; listing/competition samples add one page, each one credit. Fresh persistent local cache is reused without a provider call. Provider cache hits still cost credits and are accounted normally.
 
-TCGplayer Id in seller CSVs is a SKU, not a product ID. Parent product mappings are verified against product SKU metadata. Exact variants are matched by SKU, condition, printing, and language. Unavailable or unverified values are N/A.
+D1 transactions reserve the free allowance before requests, shared by provider account. Reservations also enforce the approved refresh budget. Costs from headers and response metadata are recorded even on unsuccessful lookups. Uncertain requests are charged conservatively and force reconciliation. Interrupted reservations are never automatically refunded. No automatic paid retries, purchases, plan changes or spending-limit writes exist.
 
-Sales archives use three-day buckets. Window unit totals are lower bounds from fully contained buckets. Units and transactions are distinct. Units per transaction uses only buckets that report both. Daily rates describe observed bucket coverage. Live listings are an English-language US-shipping sample, not complete marketplace supply. Recent product-sale samples do not identify language or unit counts and are not assigned to an exact inventory SKU. Provider processing timestamps are separate from source-record timestamps.
+Request IDs support free `/v1/results/{request_id}` recovery for 30 days. Recovery does not charge the original body's repeated `credits_used`. Cache survives billing-period changes and inventory replacement. Coverage counters, analyzed/unanalyzed filters and new-product priority support incremental analysis over multiple months.
 
-Listing priority uses configurable weights for observed sales velocity, a demand proxy, and net proceeds. Cards with non-positive net proceeds score zero. Acquisition costs and taxes are excluded. Original CSV prices are never overwritten.
+A seller CSV's `TCGplayer Id` is a SKU, not a Product ID. Include an explicit Product ID column, reuse a previously verified mapping, or add the numeric product ID from the card's TCGplayer URL in card details. Returned SKU/condition/printing/language must match before assigning sales. There is no documented direct SKU-to-product API.SH endpoint, so the app does not spend credits guessing matches.
 
-## Local development and checks
+Monthly history is daily; longer history is weekly. Exact rolling totals require every completed UTC daily bucket in the period. Missing buckets are unknown, never zero. Average units per day uses reported completed daily buckets only. Weekly data is never presented as exact daily sales. Listing/seller samples are not total supply.
 
-Use Node 22.13 or later. Run npm run dev after installing dependencies. The Sites starter provides loopback-only mock ChatGPT sign-in. Add a generated 32-byte base64 CREDENTIAL_ENCRYPTION_KEY to the ignored .dev.vars file for local credential storage. Production uses the corresponding secret configured in Sites.
+## Development
 
-Run node --test tests/core.mjs for CSV, SKU matching, volume accounting, and quota tests. Run node tests/api-smoke.mjs only against a clean local preview. This test imports 50,050 unique fixture cards and verifies persistent storage, pagination, filtering, idempotent updates, validation, export, and credential redaction. It refuses to replace non-fixture local inventory. Fixture data is never deployed.
+`npm run dev`, `npx tsc --noEmit`, `node --test tests/core.mjs tests/credits.mjs`, `node tests/api-smoke.mjs` (local preview only), then the Sites build helper. New D1 tables are added through migration 0002; historical migrations remain unchanged.
 
-The .openai/hosting.json manifest declares the private Site and DB binding. Drizzle migrations provision tables before publication. Local .dev.vars, database contents, node_modules, outputs, and build state are excluded from source control.
+## Provider references
 
-Official references
-
-- https://help.tcgplayer.com/hc/en-us/articles/115002358027-Importing-and-Exporting-CSVs-to-Mass-Update-Prices-and-Quantities
-- https://tcgapis.com/documentation
-- https://api.tcgapis.com/documentation/json
-- https://api.tcgapis.com/auth/docs-markdown
+- https://api.sh/openapi/tcgplayer.json
+- https://api.sh/docs/tcgplayer-price-history
+- https://api.sh/docs/tcgplayer-product
+- https://api.sh/docs/tcgplayer-listings
+- https://api.sh/docs/billing
+- https://api.sh/docs#account
+- https://api.sh/docs#results

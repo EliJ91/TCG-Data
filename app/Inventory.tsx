@@ -43,6 +43,10 @@ type Metadata = {
   connected: boolean;
   serverManagedKey: boolean;
   usage: RecordValue;
+  uniqueProducts: number;
+  analyzedProducts: number;
+  unanalyzedProducts: number;
+  unresolvedProducts: number;
   importing: string | null;
   uniqueCards: number;
   totalCards: number;
@@ -250,11 +254,11 @@ export default function Inventory() {
   const [advanced, setAdvanced] = useState(false),
     [view, setView] = useState("all"),
     [modal, setModal] = useState<
-      "settings" | "columns" | "refresh" | "export" | "preset" | null
+      "settings" | "columns" | "refresh" | "export" | "preset" | "account" | null
     >(null);
   const [settings, setSettings] = useState<Preferences>(defaults),
-    [keyDraft, setKeyDraft] = useState(""),
     [saving, setSaving] = useState(false);
+  const [accountReport,setAccountReport]=useState<RecordValue|null>(null), [accountBusy,setAccountBusy]=useState(false), [productDraft,setProductDraft]=useState("");
   const [saveName, setSaveName] = useState(""),
     [dragColumn, setDragColumn] = useState<string | null>(null);
   const [card, setCard] = useState<RecordValue | null>(null),
@@ -310,6 +314,7 @@ export default function Inventory() {
     direction,
     ...(choice === "selected" ? { selected: [...selected] } : {}),
   });
+  const refreshOptions={range:settings.historyRange,includePricing:settings.includePricing,includeListings:settings.includeListings,prioritizeUnanalyzed:settings.prioritizeUnanalyzed,maxProducts:settings.maxProducts};
   const showError = (problem: unknown) =>
     setError(problem instanceof Error ? problem.message : String(problem));
   const changeFilters = (next: Filters) => {
@@ -321,6 +326,7 @@ export default function Inventory() {
   const loadMetadata = async () => {
     const data = await api<Metadata>("state");
     setMeta(data);
+    if(data.connected) void api("account").then(usage=>setMeta(current=>current?{...current,usage}:current)).catch(problem=>setMeta(current=>current?{...current,usage:{...current.usage,accountError:problem.message}}:current));
     setSettings(data.settings);
     setFacets(await api("facets"));
     if (data.refresh?.status === "running") setRefresh(data.refresh);
@@ -542,7 +548,7 @@ export default function Inventory() {
     if (modal !== "refresh") return;
     let active = true;
     setPlanBusy(true);
-    void api("market/plan", { ...scopeQuery(scope), onlyStale })
+    void api("market/plan", { ...scopeQuery(scope), onlyStale, ...refreshOptions })
       .then((value) => {
         if (active) setPlan(value);
       })
@@ -559,8 +565,11 @@ export default function Inventory() {
     onlyStale,
     filters,
     selected,
-    settings.refreshDetail,
-    settings.archivePages,
+    settings.historyRange,
+    settings.includePricing,
+    settings.includeListings,
+    settings.maxProducts,
+    settings.prioritizeUnanalyzed,
   ]);
   const runRefresh = async (choice = scope, stale = onlyStale) => {
     setError("");
@@ -572,6 +581,8 @@ export default function Inventory() {
       const started = await api("market/start", {
         ...scopeQuery(choice),
         onlyStale: stale,
+        ...refreshOptions,
+        approvedCost: plan?.maximumCredits,
       });
       setRefresh({
         ...started,
@@ -613,27 +624,13 @@ export default function Inventory() {
       "Refresh cancelled. Completed requests and your previous data are saved.",
     );
   };
-  useEffect(() => {
-    if (!settings.autoMinutes || !meta?.connected || !hasInventory) return;
-    const timer = setInterval(() => {
-      if (
-        document.hidden ||
-        refreshRunning ||
-        fileBusy ||
-        Date.now() - lastAutomatic.current < settings.autoMinutes * 60000
-      )
-        return;
-      lastAutomatic.current = Date.now();
-      void runRefresh("all", true);
-    }, 30000);
-    return () => clearInterval(timer);
-  }, [
-    settings.autoMinutes,
-    meta?.connected,
-    hasInventory,
-    refreshRunning,
-    fileBusy,
-  ]);
+  useEffect(()=>{document.documentElement.dataset.theme=settings.theme;localStorage.setItem("sortswift-theme",settings.theme);},[settings.theme]);
+  useEffect(()=>{
+    if(modal!=="account")return;
+    setAccountReport(null);
+    setAccountBusy(true);
+    void api("account/details").then(report=>{setAccountReport(report);setMeta(current=>current?{...current,usage:report.snapshot}:current);}).catch(showError).finally(()=>setAccountBusy(false));
+  },[modal]);
   const exportFile = async () => {
     setSaving(true);
     setError("");
@@ -708,16 +705,18 @@ export default function Inventory() {
           </span>
         </a>
         <div className="topbar-actions">
+          <button className="button subtle credit-balance" onClick={()=>{setError("");setModal("account");}} title="View account usage and free credit reset">
+            {meta?.usage?.available!==undefined ? Number(meta.usage.available).toLocaleString()+" free credits available" : "Free credits · not connected"}
+          </button>
           <span className="connection">
             <i className={meta?.connected ? "connected" : ""} />
             {meta?.connected
-              ? "TCGAPIs connected"
+              ? "API.SH connected"
               : "Market data not connected"}
           </span>
           <button
             className="button subtle"
             onClick={() => {
-              setKeyDraft("");
               setModal("settings");
             }}
           >
@@ -766,6 +765,11 @@ export default function Inventory() {
             </div>
           )}
         </div>
+        {hasInventory && <p className="coverage-line">
+          <button className="text-button" onClick={()=>changeFilters({...filters,freshness:"analyzed"})}>{Number(meta?.analyzedProducts??0).toLocaleString()} products analyzed</button>
+          <span>·</span><button className="text-button" onClick={()=>changeFilters({...filters,freshness:"unanalyzed"})}>{Number(meta?.unanalyzedProducts??0).toLocaleString()} known products unanalyzed</button>
+          {!!meta?.unresolvedProducts && <span>· {meta.unresolvedProducts.toLocaleString()} SKU groups need Product IDs</span>}
+        </p>}
         {error && (
           <div className="banner error" role="alert">
             <AlertCircle size={18} />
@@ -1109,6 +1113,8 @@ export default function Inventory() {
                     <option value="all">Any availability</option>
                     <option value="fresh">Fresh</option>
                     <option value="missing">Missing</option>
+                    <option value="analyzed">Analyzed</option>
+                    <option value="unanalyzed">Unanalyzed</option>
                     <option value="outdated">Outdated</option>
                   </select>
                 </label>
@@ -1320,7 +1326,7 @@ export default function Inventory() {
                                   row[column.key] === null ? "unavailable" : ""
                                 }
                               >
-                                {column.key.startsWith("units") &&
+                                {column.key.startsWith("units") && row.lowerBound &&
                                 row[column.key] !== null
                                   ? "≥"
                                   : ""}
@@ -1442,11 +1448,11 @@ export default function Inventory() {
           <span>
             USD · N/A means unavailable ·{" "}
             <a
-              href="https://tcgapis.com/documentation"
+              href="https://api.sh/docs/tcgplayer-price-history"
               target="_blank"
               rel="noreferrer"
             >
-              TCGAPIs documentation <ExternalLink size={12} />
+              API.SH documentation <ExternalLink size={12} />
             </a>
           </span>
         </footer>
@@ -1595,6 +1601,22 @@ export default function Inventory() {
           </div>
         </Modal>
       )}
+      {modal === "account" && <Modal title="API.SH account and usage" error={error} onClose={()=>setModal(null)} wide>
+        <div className="modal-body account-details">
+          {accountBusy?<p><LoaderCircle className="spin" size={18}/> Reading free account endpoints…</p>:accountReport?<>
+            <div className="detail-metrics"><div><span>Free monthly credits remaining</span><strong>{accountReport.snapshot.freeRemaining??"Unknown"}</strong></div><div><span>Available for refresh</span><strong>{accountReport.snapshot.available??0}</strong></div><div><span>Monthly spend (all buckets, UTC)</span><strong>{accountReport.snapshot.monthlyUsed??"Unknown"}</strong></div><div><span>Account monthly spending limit</span><strong>{accountReport.snapshot.monthlyLimit??"Not reported"}</strong></div></div>
+            <p>Free credits reset {accountReport.snapshot.resetAt?new Date(accountReport.snapshot.resetAt).toUTCString():"when reported by API.SH"}. Account status: {accountReport.snapshot.status}. Reserved for in-flight requests: {accountReport.snapshot.reserved??0}.</p>
+            <p className="small muted">The app also enforces a 1,000-credit ceiling and never changes your provider limit. Purchased credit balances are excluded. Saved market data remains available after resets.</p>
+            {accountReport.errors?.map((e:string)=><p key={e} className="danger-text">{e}</p>)}
+            <details><summary>Daily usage and endpoint statistics · UTC</summary><pre>{JSON.stringify(accountReport.usage,null,2)}</pre></details>
+            <details><summary>Provider request logs</summary><pre>{JSON.stringify(accountReport.logs,null,2)}</pre></details>
+            <details><summary>Saved request IDs and free recovery</summary><p className="small muted">Recover a stored response free for 30 days. It does not make a new paid market lookup.</p>
+              {accountReport.requests?.map((r:RecordValue)=><div className="request-row" key={r.id}><span>{dateLabel(r.created_at)} · {r.status} · {r.charged??"unknown"} credits<br/><code>{r.request_id??"Request ID not received"}</code><br/><span className="small muted">{r.path}</span></span><button className="button" disabled={saving||!r.request_id||Date.now()-r.created_at>=30*86400000} onClick={()=>{setSaving(true);void api("market/recover",{id:r.id}).then(()=>loadMetadata()).then(()=>setNotice("Stored response recovered. No credits used.")).catch(showError).finally(()=>setSaving(false));}}>Recover free</button></div>)}
+              {!accountReport.requests?.length&&<p className="small muted">No market requests yet.</p>}
+            </details>
+          </>:<p className="muted">Set API_SH_API_KEY as a secret in the backend environment to read your account. Your existing 1,000-credit monthly limit will be preserved.</p>}
+        </div><div className="modal-footer"><button className="button" onClick={()=>setModal(null)}>Close</button></div>
+      </Modal>}
       {modal === "settings" && (
         <Modal
           error={error}
@@ -1604,50 +1626,14 @@ export default function Inventory() {
         >
           <div className="modal-body settings-body">
             <section>
-              <h3>TCGAPIs connection</h3>
-              <p className="muted small">
-                Your API key is encrypted on the server and is never sent back
-                to this page. Opening the app or importing inventory uses no API
-                credits.
-              </p>
-              <label>
-                API key
-                <input
-                  type="password"
-                  autoComplete="new-password"
-                  placeholder={
-                    meta?.connected
-                      ? "A key is already connected"
-                      : "Paste your TCGAPIs API key"
-                  }
-                  value={keyDraft}
-                  onChange={(event) => setKeyDraft(event.target.value)}
-                />
-              </label>
-              <a
-                className="text-link"
-                href="https://tcgapis.com"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Get a TCGAPIs account <ExternalLink size={12} />
-              </a>
-              {meta?.connected && !meta.serverManagedKey && (
-                <button
-                  className="text-button danger-text"
-                  onClick={() =>
-                    void updateSettings(settings, { clearKey: true })
-                      .then(() =>
-                        setNotice(
-                          "TCGAPIs disconnected. Cached data is preserved.",
-                        ),
-                      )
-                      .catch(showError)
-                  }
-                >
-                  Disconnect key
-                </button>
-              )}
+              <h3>Appearance</h3>
+              <label>Theme<select value={settings.theme} onChange={e=>setSettings({...settings,theme:e.target.value as Preferences["theme"]})}><option value="dark">Black dark mode</option><option value="light">Light mode</option></select></label>
+            </section>
+            <section>
+              <h3>API.SH connection</h3>
+              <p className="small muted">{meta?.connected?"The backend API key is configured.":"Set API_SH_API_KEY as a secret in this site's backend environment to connect."} Your key stays on the server. Account checks are free. Importing inventory never requests paid data.</p>
+              <p className="small muted">Only verified free monthly credits are available for refreshes. The existing 1,000-credit spending limit is never changed. Purchased credits and paid features are not enabled by this app.</p>
+              <button className="button" onClick={()=>{setError("");setModal("account");}}>Account and usage</button>
             </section>
             <section>
               <h3>Pricing</h3>
@@ -1728,96 +1714,17 @@ export default function Inventory() {
             <section>
               <h3>Refresh preferences</h3>
               <div className="settings-grid">
-                <label>
-                  Data to request
-                  <select
-                    value={settings.refreshDetail}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        refreshDetail: event.target
-                          .value as Preferences["refreshDetail"],
-                      })
-                    }
-                  >
-                    <option value="standard">Pricing and sales archive</option>
-                    <option value="complete">
-                      Pricing, archive, history, and listing samples
-                    </option>
-                  </select>
-                </label>
-                <label>
-                  Archive pages per product
-                  <input
-                    type="number"
-                    min="1"
-                    max="10"
-                    value={settings.archivePages}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        archivePages: Number(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  Outdated after (hours)
-                  <input
-                    type="number"
-                    min="1"
-                    value={settings.staleHours}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        staleHours: Number(event.target.value),
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  Automatic refresh
-                  <select
-                    value={settings.autoMinutes}
-                    onChange={(event) =>
-                      setSettings({
-                        ...settings,
-                        autoMinutes: Number(event.target.value),
-                      })
-                    }
-                  >
-                    <option value="0">Off · refresh on demand</option>
-                    <option value="15">Every 15 minutes while open</option>
-                    <option value="60">Every hour while open</option>
-                    <option value="240">Every 4 hours while open</option>
-                    <option value="1440">Daily while open</option>
-                  </select>
-                </label>
+                <label>Maximum products per refresh<input type="number" min="1" max="1000" value={settings.maxProducts} onChange={e=>setSettings({...settings,maxProducts:Number(e.target.value)})}/></label>
+                <label>Outdated after (hours)<input type="number" min="1" value={settings.staleHours} onChange={e=>setSettings({...settings,staleHours:Number(e.target.value)})}/></label>
               </div>
-              <p className="small muted">
-                Automatic refresh only requests missing or outdated data while
-                this tab is open. It uses your API allowance. On-demand refresh
-                always shows a credit estimate first.
-              </p>
+              <label className="check-label"><input type="checkbox" checked={settings.prioritizeUnanalyzed} onChange={e=>setSettings({...settings,prioritizeUnanalyzed:e.target.checked})}/>Analyze new products first</label>
+              <p className="small muted">Every refresh shows its estimated cost first. Results are kept across monthly resets so you can continue analyzing a large inventory over time.</p>
             </section>
-            <section className="data-notes">
-              <h3>What the source can verify</h3>
-              <p className="small muted">
-                Three-day archive buckets report units and transaction counts
-                separately. Window totals are lower bounds. Recent product-sale
-                samples do not identify language or units. Live listings are
-                limited to an English-language US-shipping sample. Unavailable
-                totals, exact sale dates, and unverified variant matches remain
-                N/A.
-              </p>
-              <a
-                href="https://tcgapis.com/documentation"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Current provider documentation <ExternalLink size={12} />
-              </a>
-            </section>
+            <details className="data-notes"><summary>Data coverage</summary>
+              <p className="small muted">Monthly history supplies daily buckets. Longer ranges supply weekly buckets. Exact rolling totals require complete daily coverage; missing or unanalyzed data remains N/A. A listing sample is not total marketplace supply.</p>
+              <p className="small muted">A TCGplayer SKU is different from a Product ID. Include a Product ID column in your CSV, or add the ID from the TCGplayer product URL in card details. The returned SKU must match before sales are assigned.</p>
+              <a href="https://api.sh/docs/tcgplayer-price-history" target="_blank" rel="noreferrer">Provider documentation <ExternalLink size={12}/></a>
+            </details>
           </div>
           <div className="modal-footer">
             <button
@@ -1835,12 +1742,8 @@ export default function Inventory() {
               onClick={async () => {
                 setSaving(true);
                 try {
-                  await updateSettings(
-                    settings,
-                    keyDraft ? { key: keyDraft } : undefined,
-                  );
-                  setKeyDraft("");
-                  setModal(null);
+                  await updateSettings(settings);
+                      setModal(null);
                   setNotice("Settings saved.");
                 } catch (problem) {
                   showError(problem);
@@ -2006,6 +1909,16 @@ export default function Inventory() {
               />
               Only missing or outdated market data
             </label>
+            <details className="refresh-options" open>
+              <summary>Data to refresh</summary>
+              <label>Sales history period<select value={settings.historyRange} onChange={e=>setSettings({...settings,historyRange:e.target.value as Preferences["historyRange"]})}><option value="month">Past month · daily data</option><option value="quarter">Past quarter · weekly data</option><option value="semi-annual">Past 6 months · weekly data</option><option value="annual">Past year · weekly data</option></select></label>
+              <label className="check-label"><input type="checkbox" checked={settings.prioritizeUnanalyzed} onChange={e=>setSettings({...settings,prioritizeUnanalyzed:e.target.checked})}/>Analyze new products first</label>
+              <details><summary>Optional pricing and competition</summary>
+                <label className="check-label"><input type="checkbox" checked={settings.includePricing} onChange={e=>setSettings({...settings,includePricing:e.target.checked})}/>Current SKU prices · +1 credit per product</label>
+                <label className="check-label"><input type="checkbox" checked={settings.includeListings} onChange={e=>setSettings({...settings,includeListings:e.target.checked})}/>Listing and seller sample · +1 credit per product</label>
+                <p className="small muted">One page, up to 50 listings across variants. No extra requests per variant.</p>
+              </details>
+            </details>
             <div className="estimate">
               {planBusy ? (
                 <p>
@@ -2024,10 +1937,13 @@ export default function Inventory() {
                     credits
                   </strong>
                   <p>
-                    {plan.groups.toLocaleString()} card lookups · up to{" "}
+                    {plan.groups.toLocaleString()} unique products · up to{" "}
                     {plan.maximumRequests.toLocaleString()} requests
                   </p>
                   <p className="small muted">{plan.note}</p>
+                  {plan.accountError&&<p className="danger-text">{plan.accountError}</p>}
+                  {plan.account&&<p className="small muted">{plan.account.freeRemaining} free credits remain. Reset {new Date(plan.account.resetAt).toUTCString()}. {plan.account.monthlyUsed} credits used this UTC month.</p>}
+                  {!!plan.unresolved&&<p className="small muted">{plan.unresolved} SKU groups need a Product ID. Add it in card details or your CSV.</p>}
                 </>
               ) : (
                 <p className="muted">No estimate available.</p>
@@ -2035,7 +1951,7 @@ export default function Inventory() {
             </div>
             {!meta?.connected && (
               <p className="connection-note">
-                Connect your TCGAPIs key in Settings to request live market
+                Configure the backend API.SH key to request live market
                 data. Your CSV can be used independently.
               </p>
             )}
@@ -2049,7 +1965,7 @@ export default function Inventory() {
                 className="button primary"
                 onClick={() => setModal("settings")}
               >
-                Connect TCGAPIs
+                Connection settings
               </button>
             ) : (
               <button
@@ -2243,6 +2159,11 @@ export default function Inventory() {
                     </p>
                   </div>
                 </div>
+                {!card.card.productId && card.card.skuId && <details>
+                  <summary>Add or correct Product ID</summary>
+                  <p className="small muted">Use the number after /product/ in this card's TCGplayer URL. This saves a mapping without spending credits or changing your original CSV. The history response must contain the matching SKU.</p>
+                  <div className="actions"><input aria-label="TCGplayer Product ID" inputMode="numeric" placeholder="Product ID" value={productDraft} onChange={e=>setProductDraft(e.target.value)}/><button className="button" disabled={!/^\d+$/.test(productDraft)||activeRefresh} onClick={()=>void api("market/product",{key:card.card.key,productId:productDraft}).then(()=>{setProductDraft("");setCard(null);return loadMetadata();}).then(()=>setNotice("Product ID saved. Refresh market data to verify the SKU.")).catch(showError)}>Save Product ID</button></div>
+                </details>}
                 {card.detail && (
                   <>
                     <div
@@ -2274,9 +2195,7 @@ export default function Inventory() {
                       type={historyType}
                     />
                     <p className="small muted">
-                      Historical data is grouped into three-day source buckets.{" "}
-                      {card.detail.coveredDays ?? 0} days are covered in the
-                      current 30-day sales window.
+                      History uses {card.detail.granularity ?? "source"} buckets. {card.detail.coveredDays ?? 0} completed daily buckets are available in the latest 30-day window. Missing totals remain N/A.
                     </p>
                   </>
                 )}
@@ -2302,7 +2221,7 @@ export default function Inventory() {
                       <div key={column.key}>
                         <span title={column.note}>{column.label}</span>
                         <strong>
-                          {column.key.startsWith("units") &&
+                          {column.key.startsWith("units") && card.market?.lowerBound &&
                           card.market?.[column.key] !== null &&
                           card.market?.[column.key] !== undefined
                             ? "≥"

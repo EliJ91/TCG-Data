@@ -3,6 +3,6 @@ declare namespace Cloudflare {
     DB?: D1Database;
     BUCKET?: R2Bucket;
     CREDENTIAL_ENCRYPTION_KEY?: string;
-    TCGAPIS_API_KEY?: string;
+    API_SH_API_KEY?: string;
   }
 }

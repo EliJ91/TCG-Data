@@ -35,8 +35,12 @@ export type Preferences = {
   profitWeight: number;
   staleHours: number;
   autoMinutes: number;
-  archivePages: number;
-  refreshDetail: "standard" | "complete";
+  historyRange: "month" | "quarter" | "semi-annual" | "annual";
+  includePricing: boolean;
+  includeListings: boolean;
+  prioritizeUnanalyzed: boolean;
+  maxProducts: number;
+  theme: "light" | "dark";
   visibleColumns: string[];
   presets: {
     name: string;
@@ -68,8 +72,12 @@ export const defaults: Preferences = {
   profitWeight: 20,
   staleHours: 24,
   autoMinutes: 0,
-  archivePages: 5,
-  refreshDetail: "standard",
+  historyRange: "month",
+  includePricing: false,
+  includeListings: false,
+  prioritizeUnanalyzed: true,
+  maxProducts: 100,
+  theme: "dark",
   visibleColumns: defaultColumns,
   presets: [],
 };
@@ -118,20 +126,20 @@ export const columns: Column[] = [
     key: "units" + days,
     label: "Units sold · " + days + "d",
     kind: "number" as const,
-    note: "Lower bound from fully contained three-day source buckets. N/A means unavailable.",
+    note: "Exact completed UTC-day totals require daily data for every day. N/A means the requested period is not fully covered.",
   })),
   { key: "transactions30", label: "Transactions · 30d", kind: "number" },
   {
     key: "dailySales",
     label: "Units / day",
     kind: "number",
-    note: "Units divided by days covered by returned archive buckets.",
+    note: "Average of reported completed daily buckets. Weekly data is never treated as daily sales.",
   },
   {
     key: "salesFrequency",
     label: "Sales frequency",
     kind: "number",
-    note: "Transactions per day covered by the returned three-day archive buckets.",
+    note: "Transactions per completed UTC day when the full 30-day window is covered.",
   },
   { key: "unitsPerTransaction", label: "Units / transaction", kind: "number" },
   { key: "lastSoldAt", label: "Last reported sale", kind: "date" },
@@ -177,22 +185,23 @@ export function normalizePreferences(value: Partial<Preferences>): Preferences {
     "profitWeight",
     "staleHours",
     "autoMinutes",
-    "archivePages",
+    "maxProducts",
   ] as const) {
     if (!Number.isFinite(result[field]) || result[field] < 0)
       result[field] = defaults[field];
   }
   result.feePercent = Math.min(100, result.feePercent);
   result.velocityTarget = Math.max(0.01, result.velocityTarget);
-  result.archivePages = Math.max(
-    1,
-    Math.min(10, Math.round(result.archivePages)),
-  );
+  result.maxProducts=Math.max(1,Math.min(1000,Math.round(result.maxProducts)));
   result.autoMinutes =
     result.autoMinutes === 0 ? 0 : Math.max(15, result.autoMinutes);
   result.staleHours = Math.max(1, result.staleHours);
-  result.refreshDetail =
-    result.refreshDetail === "complete" ? "complete" : "standard";
+  result.autoMinutes=0;
+  result.historyRange=["month","quarter","semi-annual","annual"].includes(result.historyRange)?result.historyRange:"month";
+  result.includePricing=result.includePricing===true;
+  result.includeListings=result.includeListings===true;
+  result.prioritizeUnanalyzed=result.prioritizeUnanalyzed!==false;
+  result.theme=result.theme==="light"?"light":"dark";
   result.visibleColumns = Array.isArray(result.visibleColumns)
     ? [
         ...new Set(

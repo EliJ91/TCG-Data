@@ -55,7 +55,9 @@ export default function HistoryChart({
       />
       <Tooltip
         contentStyle={{
-          border: "1px solid #e4e7eb",
+          border: "1px solid var(--line)",
+          background: "var(--surface)",
+          color: "var(--ink)",
           borderRadius: 8,
           fontSize: 13,
         }}
@@ -73,7 +75,7 @@ export default function HistoryChart({
             {common}
             <Bar
               dataKey="units"
-              name="Units / three-day bucket"
+              name="Units / reported bucket"
               fill="#28634d"
               radius={[3, 3, 0, 0]}
             />

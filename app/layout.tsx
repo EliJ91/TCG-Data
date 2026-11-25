@@ -17,8 +17,8 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
-      <body className="antialiased">{children}</body>
+    <html lang="en" data-theme="dark" suppressHydrationWarning>
+      <body className="antialiased"><script dangerouslySetInnerHTML={{__html:`try{document.documentElement.dataset.theme=localStorage.getItem('sortswift-theme')||'dark'}catch{}`}}/>{children}</body>
     </html>
   );
 }

@@ -70,33 +70,9 @@ export async function protectSecret(value: string) {
     btoa(String.fromCharCode(...new Uint8Array(encrypted)))
   );
 }
-export async function apiKey(space: Workspace) {
-  if (env.TCGAPIS_API_KEY) return env.TCGAPIS_API_KEY;
-  if (!space.secret || !env.CREDENTIAL_ENCRYPTION_KEY)
-    throw new AppError(
-      "Connect your TCGAPIs account in Settings before refreshing market data.",
-      409,
-    );
-  const [iv, data] = space.secret.split(".");
-  const key = await crypto.subtle.importKey(
-    "raw",
-    Uint8Array.from(atob(env.CREDENTIAL_ENCRYPTION_KEY), (c) =>
-      c.charCodeAt(0),
-    ),
-    "AES-GCM",
-    false,
-    ["decrypt"],
-  );
-  return new TextDecoder().decode(
-    await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: Uint8Array.from(atob(iv), (c) => c.charCodeAt(0)),
-      },
-      key,
-      Uint8Array.from(atob(data), (c) => c.charCodeAt(0)),
-    ),
-  );
+export async function apiKey(_space?: Workspace) {
+  if (!env.API_SH_API_KEY) throw new AppError("Set the backend API_SH_API_KEY environment variable to connect API.SH.", 409);
+  return env.API_SH_API_KEY;
 }
 export async function state(owner: string) {
   const space = await workspace(owner),
@@ -113,14 +89,20 @@ export async function state(owner: string) {
     )
     .bind(owner)
     .first();
+  const coverage = await db.prepare(`SELECT COUNT(DISTINCT COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract(a.data,'$.productId'))) AS uniqueProducts,
+    COUNT(DISTINCT CASE WHEN COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0)=1 THEN COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract(a.data,'$.productId')) END) AS analyzedProducts,
+    COUNT(DISTINCT CASE WHEN COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract(a.data,'$.productId')) IS NULL THEN COALESCE(NULLIF(json_extract(c.info,'$.skuId'),''),c.card_key) END) AS unresolvedProducts
+    FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN api_cache a ON a.id=c.owner||'|sku-map:'||json_extract(c.info,'$.skuId') WHERE c.owner=? AND c.version=?`).bind(owner,space.active_version??"").first<any>();
   return {
+    ...coverage,
+    unanalyzedProducts: Number(coverage?.uniqueProducts??0)-Number(coverage?.analyzedProducts??0),
     filename: space.filename,
     headers: JSON.parse(space.headers),
     importedAt: space.imported_at,
     updatedAt: space.updated_at,
     settings: preferences(space),
-    connected: !!(space.secret || env.TCGAPIS_API_KEY),
-    serverManagedKey: !!env.TCGAPIS_API_KEY,
+    connected: !!env.API_SH_API_KEY,
+    serverManagedKey: !!env.API_SH_API_KEY,
     usage: JSON.parse(space.usage),
     importing: space.import_lock,
     ...totals,
@@ -136,9 +118,8 @@ export async function savePreferences(
     ...preferences(space),
     ...input.settings,
   });
-  let secret = space.secret;
-  if (input.clearKey) secret = "";
-  if (input.key?.trim()) secret = await protectSecret(input.key.trim());
+  if (input.key) throw new AppError("Configure API_SH_API_KEY on the backend; API keys are not accepted by this page.");
+  const secret = input.clearKey ? "" : space.secret;
   await database()
     .prepare("UPDATE workspaces SET settings=?,secret=? WHERE owner=?")
     .bind(JSON.stringify(settings), secret, owner)
@@ -392,7 +373,7 @@ export function expressions(p: Preferences) {
   for (const column of marketFields)
     result[column.key] = "json_extract(m.data,'$." + column.key + "')";
   result.productId =
-    "COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id)";
+    "COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract((SELECT data FROM api_cache WHERE id=c.owner||'|sku-map:'||json_extract(c.info,'$.skuId')),'$.productId'))";
   result.quantity = "c.quantity";
   result.fetchedAt = "m.fetched_at";
   const velocity =
@@ -516,6 +497,8 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
       values.push(Number(filter.max));
     }
   }
+  if (f?.freshness === "analyzed") where.push("COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0)=1");
+  if (f?.freshness === "unanalyzed") where.push("COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0)=0");
   if (f?.freshness === "missing")
     where.push("(m.id IS NULL OR json_extract(m.data,'$.available')=0)");
   if (f?.freshness === "fresh") {
@@ -555,7 +538,7 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
   const sql =
     "SELECT c.card_key AS key," +
     select +
-    ",json_extract(m.data,'$.scope') AS scope,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE " +
+    ",json_extract(m.data,'$.scope') AS scope,json_extract(m.data,'$.lowerBound') AS lowerBound,COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0) AS analyzed,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE " +
     where.join(" AND ") +
     " ORDER BY " +
     order +

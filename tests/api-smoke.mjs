@@ -121,8 +121,12 @@ const missing = await query({
 });
 assert.equal(missing.matches, 50050);
 const plan = await api("market/plan", { filters: {}, onlyStale: true });
-assert.equal(plan.groups, 50050);
-assert(plan.maximumCredits > 0);
+assert.equal(plan.groups, 0);
+assert.equal(plan.unresolved,50050);
+assert.equal(plan.maximumCredits,0);
+assert.equal(state.unresolvedProducts,50050);
+assert.equal((await query({filters:{freshness:"unanalyzed"}})).matches,50050);
+assert.equal((await query({filters:{freshness:"analyzed"}})).matches,0);
 const disconnected = await fetch(origin + "/api/market/start", {
   method: "POST",
   headers: {
@@ -176,12 +180,10 @@ const rejected = await fetch(origin + "/api/imports/chunk", {
 assert.equal(rejected.status, 400);
 assert.equal((await api("state")).uniqueCards, 50051);
 await api("imports/cancel", { id: invalid.id });
-const configured = await api("preferences", {
-  key: "local-qa-placeholder-never-used-upstream",
-});
-assert.equal(configured.connected, true);
-assert(!JSON.stringify(configured).includes("local-qa-placeholder"));
-await api("preferences", { clearKey: true });
+const configured=await api("preferences",{settings:{theme:"dark",maxProducts:25}});
+assert.equal(configured.connected,false);assert.equal(configured.settings.theme,"dark");assert.equal(configured.settings.maxProducts,25);
+await api("market/product",{key:rows[1].info.key,productId:"123456"});
+const linked=await query({selected:[rows[1].info.key]});assert.equal(linked.rows[0].productId,"123456");
 state = await importRows(
   [row(1, 2), row(2, 1), row(3, 4)],
   "replace",
@@ -191,5 +193,5 @@ assert.equal(state.uniqueCards, 3);
 assert.equal(state.totalCards, 7);
 assert.equal((await api("state")).filename, "qa-browser.csv");
 console.log(
-  "Verified 50,050 unique cards, persistence, filtering, pagination, CSV round-trip, idempotent updates, replacement validation, credential redaction, and zero automatic market requests.",
+  "Verified 50,050 unique cards, persistence, filtering, pagination, CSV round-trip, idempotent updates, replacement validation, backend key isolation, coverage filters, manual product mapping, and zero automatic market requests.",
 );
