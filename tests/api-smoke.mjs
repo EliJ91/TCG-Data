@@ -108,7 +108,7 @@ const first = await query({
 });
 assert.equal(first.rows[0].quantity, 3);
 assert.equal(first.matches, 50050);
-assert.equal(first.rows[0].marketPrice, null);
+assert.equal(first.rows[0].marketPrice, undefined);
 assert.equal(first.value, null);
 const filtered = await query({
   filters: {

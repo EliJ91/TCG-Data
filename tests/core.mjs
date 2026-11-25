@@ -24,7 +24,7 @@ function moduleUrl(path, replacements = {}) {
 }
 const domain = moduleUrl("../lib/domain.ts");
 const csv = await import(moduleUrl("../lib/csv.ts", { "./domain": domain }));
-const {normalizeMarket,accountSnapshot,chargedCredits,DAY}=await import(moduleUrl("../lib/api-sh.ts"));
+const {normalizeMarket,salesOnlyResponse,salesHistoryPath,mergeSalesHistory,accountSnapshot,chargedCredits,DAY}=await import(moduleUrl("../lib/api-sh.ts"));
 
 test("Only the selected Product ID column is required and every original value survives", () => {
   const input =
@@ -72,37 +72,43 @@ const now=Date.parse("2026-11-24T19:00:00Z"),today=Date.parse("2026-11-24T00:00:
 const info={skuId:"77",condition:"Near Mint",printing:"Holofoil",language:"EN"};
 const points=Array.from({length:90},(_,i)=>({date:new Date(today-(90-i)*DAY).toISOString().slice(0,10),quantity_sold:2,transactions:1,market_price:10,low_sale:8,high_sale:12}));
 const fixture=(range="month")=>({product_id:123,range,currency:"USD",series:[{sku:77,condition:"Near Mint",printing:"Holofoil",language:"English",points}]});
-test("Monthly daily data produces exact complete UTC-day totals",()=>{
+test("Sales normalization keeps quantities and never adds prices or valuations",()=>{
  const {metrics,detail}=normalizeMarket(info,fixture(),{},now);
- assert.equal(metrics.units7,14);assert.equal(metrics.units30,60);assert.equal(metrics.dailySales,2);assert.equal(metrics.transactions30,30);assert.equal(metrics.unitsPerTransaction,2);assert.equal(metrics.lowerBound,false);assert.equal(detail.coveredDays,30);
+ assert.equal(metrics.unitsSold,180);assert.equal(detail.history.length,90);
+ assert.equal(metrics.marketPrice,undefined);assert.equal(metrics.netProceeds,undefined);
+ assert(detail.history.every(point=>Object.keys(point).sort().join(',')==='date,units'));
+ const selected=salesOnlyResponse(fixture());
+ assert(!JSON.stringify(selected).includes('market_price'));
+ assert(!JSON.stringify(selected).includes('low_sale'));
+ const path=new URL('https://api.api.sh'+salesHistoryPath('123'));
+ assert.equal(path.searchParams.get('range'),'annual');assert.equal(path.searchParams.get('raw'),'0');
+ assert(path.searchParams.get('fields').includes('series.points.quantity_sold'));
+ assert(!path.searchParams.get('fields').includes('price'));
 });
-test("Product-only rows combine SKU sales without inventing a shared variant price",()=>{
- const data=fixture();data.series.push({...data.series[0],sku:78,condition:"Lightly Played"});
- const {metrics,detail}=normalizeMarket({productId:"123"},data,{},now);
- assert.equal(metrics.units30,120);assert.equal(metrics.dailySales,4);assert.equal(metrics.transactions30,60);
- assert.equal(metrics.scope,"Product · all SKUs");assert.equal(metrics.marketPrice,null);assert.equal(detail.sku,null);
- data.series[1].points=points.slice(0,-1);
- const incomplete=normalizeMarket({productId:"123"},data,{},now).metrics;
- assert.equal(incomplete.units7,null);
- assert.equal(normalizeMarket({productId:"123"},{...data,range:"quarter"},{},now).metrics.dailySales,null);
+test("The widest weekly history keeps weekly counts without inventing individual days",()=>{
+ const {metrics,detail}=normalizeMarket(info,fixture('annual'),{},now);
+ assert.equal(metrics.unitsSold,180);assert.equal(metrics.granularity,'weekly');
+ assert.equal(metrics.dailySales,undefined);assert.equal(metrics.units7,undefined);
+ assert.equal(detail.history[0].units,2);
 });
-test("Weekly aggregates never become exact daily rates or rolling totals",()=>{
- const {metrics}=normalizeMarket(info,fixture("quarter"),{},now);
- for(const key of ["units7","units30","dailySales","transactions30","salesFrequency"])assert.equal(metrics[key],null,key);
- assert.equal(metrics.marketPrice,10);
+test("Product-only rows combine SKU quantities in one response",()=>{
+ const input=fixture('annual');input.series.push({...input.series[0],sku:78,condition:'Lightly Played'});
+ const {metrics}=normalizeMarket({productId:'123'},input,{},now);
+ assert.equal(metrics.unitsSold,360);assert.equal(metrics.scope,'Product · all SKUs');
+ input.series[1].points=points.map((point,i)=>i===0?{...point,quantity_sold:null}:point);
+ assert.equal(normalizeMarket({productId:'123'},input,{},now).metrics.unitsSold,null);
 });
-test("Missing daily buckets and unmatched variants stay unknown, not zero",()=>{
- const data=fixture();data.series[0].points=points.slice(0,-1);
- assert.equal(normalizeMarket(info,data,{},now).metrics.units7,null);
- const unmatched=normalizeMarket({...info,condition:"Lightly Played"},fixture(),{},now).metrics;
- assert.equal(unmatched.available,false);assert.equal(unmatched.units30,null);assert.equal(unmatched.marketPrice,null);
- const empty=normalizeMarket(info,{product_id:123,range:"month",series:[]},{},now).metrics;
- assert.equal(empty.units30,null);
+test("Unknown or unmatched sales stay N/A; reported zero remains zero",()=>{
+ assert.equal(normalizeMarket({...info,condition:'Lightly Played'},fixture(),{},now).metrics.unitsSold,null);
+ assert.equal(normalizeMarket(info,{product_id:123,range:'annual',series:[]},{},now).metrics.unitsSold,null);
+ const zero=fixture('annual');zero.series[0].points=points.map(point=>({...point,quantity_sold:0}));
+ assert.equal(normalizeMarket(info,zero,{},now).metrics.unitsSold,0);
 });
-test("Real zero daily buckets remain valid zero sales",()=>{
- const data=fixture();data.series[0].points=points.map(p=>({...p,quantity_sold:0,transactions:0,market_price:0}));
- const {metrics}=normalizeMarket(info,data,{},now);assert.equal(metrics.units30,0);assert.equal(metrics.marketPrice,0);
+test("Saved sales history preserves older dates and replaces matching dates without double counting",()=>{
+ const merged=mergeSalesHistory([{date:1,units:2,market:99},{date:2,units:3}],[{date:2,units:4},{date:3,units:8}]);
+ assert.deepEqual(merged,[{date:1,units:2},{date:2,units:4},{date:3,units:8}]);
 });
+
 test("Free bucket, UTC reset and fixed ceiling exclude purchased balance",()=>{
  const body={account:{id:"account",status:"active"},credits:{free:3,total:5003,payg:5000,free_resets_at:"2026-12-01T00:00:00Z"},spend:{this_month:997,today:0,monthly_limit:1000,daily_limit:null,period:"UTC"}};
  assert.equal(accountSnapshot(body,now).available,3);
@@ -117,9 +123,4 @@ test("Failed lookups count actual charges and combined remaining is never free a
  assert.deepEqual(chargedCredits(h,{credits_used:1},1),{used:1,verified:true,combinedRemaining:5003,requestId:"id"});
  assert.equal(chargedCredits(new Headers(),{},1).verified,false);
  assert.equal(chargedCredits(new Headers({"x-credits-used":"0"}),{credits_used:1},1).used,1);
-});
-test("Listing samples are not total market supply or seller counts",()=>{
- const extras={listings:{total:100,next_page:2,listings:[{sku:77,condition:"Near Mint",printing:"Holofoil",language:"English",price:4,quantity:2,seller:{key:"a"}}]}};
- const {metrics}=normalizeMarket(info,fixture(),extras,now);
- assert.equal(metrics.sampleSupply,2);assert.equal(metrics.sampleSellers,1);assert.equal(metrics.totalSupply,null);assert.equal(metrics.competingSellers,null);assert.equal(metrics.activeListings,null);
 });

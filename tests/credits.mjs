@@ -58,11 +58,12 @@ test("Provider cache avoids repeated paid calls and failed lookups retain charge
    if(String(url).includes("id=999"))return Response.json({error:"not found",credits_used:1},{status:404,headers:{"x-credits-used":"1","x-request-id":crypto.randomUUID()}});
    return Response.json({product_id:123,range:"month",currency:"USD",series:[],credits_used:1},{headers:{"x-credits-used":"1","x-request-id":crypto.randomUUID()}});
  };
- const path="/tcgplayer/v1/price-history?id=123&range=month";
+ const {salesHistoryPath}=await import(adapter);
+ const path=salesHistoryPath("123");
  await market.provider("owner","provider","test",path,24);
  await market.provider("owner","provider","test",path,24);
  assert.equal(paid,1,"fresh local cache must eliminate the second charge");
- await assert.rejects(()=>market.provider("owner","provider","test","/tcgplayer/v1/price-history?id=999&range=month",24),/HTTP 404/);
+ await assert.rejects(()=>market.provider("owner","provider","test",salesHistoryPath("999"),24),/HTTP 404/);
  assert.equal(paid,2,"charged failures must not be retried automatically");
  const record=sql.prepare("SELECT * FROM api_requests WHERE run_id='provider' AND status='error'").get();assert.equal(record.charged,1);assert(record.request_id);
  assert.equal(sql.prepare("SELECT spent FROM refresh_runs WHERE id='provider'").get().spent,2);

@@ -82,7 +82,7 @@ export async function state(owner: string) {
     db = database();
   const totals = await db
     .prepare(
-      "SELECT COUNT(*) AS uniqueCards,COALESCE(SUM(c.quantity),0) AS totalCards,SUM(c.quantity*json_extract(m.data,'$.marketPrice')) AS inventoryValue FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE c.owner=? AND c.version=?",
+      "SELECT COUNT(*) AS uniqueCards,COALESCE(SUM(c.quantity),0) AS totalCards,MIN(json_extract(m.data,'$.historyFrom')) AS historyFrom,MAX(json_extract(m.data,'$.historyTo')) AS historyTo FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE c.owner=? AND c.version=?",
     )
     .bind(owner, space.active_version ?? "")
     .first();
@@ -380,73 +380,9 @@ export function expressions(p: Preferences) {
     "COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract((SELECT data FROM api_cache WHERE id=c.owner||'|sku-map:'||json_extract(c.info,'$.skuId')),'$.productId'))";
   result.quantity = "c.quantity";
   result.fetchedAt = "m.fetched_at";
-  const velocity =
-    "MIN(100,MAX(0," + result.dailySales + "/" + p.velocityTarget + "*100))";
-  result.velocityScore =
-    "CASE WHEN " + result.dailySales + " IS NOT NULL THEN " + velocity + " END";
-  result.demandScore =
-    "CASE WHEN " +
-    result.dailySales +
-    " IS NOT NULL THEN (" +
-    velocity +
-    "+MIN(100,MAX(0,50+COALESCE(" +
-    result.salesTrend +
-    ",0)/2)))/2 END";
-  result.competitionScore =
-    "CASE WHEN " +
-    result.sampleSellers +
-    " IS NOT NULL THEN MIN(100," +
-    result.sampleSellers +
-    "*5) END";
-  result.recommendedPrice =
-    "CASE WHEN " +
-    result.marketPrice +
-    " IS NOT NULL OR " +
-    result.listingLow +
-    " IS NOT NULL THEN MAX(" +
-    p.minimumPrice +
-    ",COALESCE(" +
-    result.listingLow +
-    "," +
-    result.marketPrice +
-    ")) END";
-  result.netProceeds =
-    "(" +
-    result.recommendedPrice +
-    "*(1-" +
-    p.feePercent +
-    "/100.0)-" +
-    p.fixedFee +
-    "-" +
-    p.shipping +
-    ")";
-  result.inventoryValue = "(" + result.marketPrice + "*c.quantity)";
-  const profit = "MIN(100,MAX(0," + result.netProceeds + "*10))",
-    denominator = p.velocityWeight + p.demandWeight + p.profitWeight;
-  result.priority =
-    denominator > 0
-      ? "CASE WHEN " +
-        result.netProceeds +
-        " <= 0 THEN 0 WHEN " +
-        result.dailySales +
-        " IS NOT NULL AND " +
-        result.netProceeds +
-        " IS NOT NULL THEN MAX(0,MIN(100,(" +
-        result.velocityScore +
-        "*" +
-        p.velocityWeight +
-        "+" +
-        result.demandScore +
-        "*" +
-        p.demandWeight +
-        "+" +
-        profit +
-        "*" +
-        p.profitWeight +
-        ")/" +
-        denominator +
-        ")) END"
-      : "NULL";
+  result.unitsSold = "COALESCE(json_extract(m.data,'$.unitsSold'),(SELECT CASE WHEN COUNT(*)=0 OR SUM(CASE WHEN json_extract(h.value,'$.units') IS NULL OR json_extract(h.value,'$.units')<0 THEN 1 ELSE 0 END)>0 THEN NULL ELSE SUM(json_extract(h.value,'$.units')) END FROM json_each(m.detail,'$.history') h))";
+  result.historyFrom = "COALESCE(json_extract(m.data,'$.historyFrom'),(SELECT MIN(json_extract(h.value,'$.date')) FROM json_each(m.detail,'$.history') h))";
+  result.historyTo = "COALESCE(json_extract(m.data,'$.historyTo'),(SELECT MAX(json_extract(h.value,'$.date')) FROM json_each(m.detail,'$.history') h))";
   return result;
 }
 export type QueryInput = {
@@ -466,6 +402,13 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
   for (const header of headers)
     e[csvColumnKey(header)] = "(SELECT value FROM json_each(r.raw) WHERE key='" + header.replaceAll("'", "''") + "')";
   e.rowNo = "r.row_no";
+  const from = f?.dateFrom ? Date.parse(f.dateFrom) : null, to = f?.dateTo ? Date.parse(f.dateTo) : null;
+  if ((from !== null && !Number.isFinite(from)) || (to !== null && !Number.isFinite(to)) || (from !== null && to !== null && from > to)) throw new AppError("Choose a valid sales date range with the start before the end.");
+  if (from !== null || to !== null) {
+    const dates = [from !== null ? "json_extract(h.value,'$.date')>="+from : "1", to !== null ? "json_extract(h.value,'$.date')<"+(to+86400000) : "1"].join(" AND ");
+    e.unitsSold = "(SELECT CASE WHEN COUNT(*)=0 OR SUM(CASE WHEN json_extract(h.value,'$.units') IS NULL OR json_extract(h.value,'$.units')<0 THEN 1 ELSE 0 END)>0 THEN NULL ELSE SUM(json_extract(h.value,'$.units')) END FROM json_each(m.detail,'$.history') h WHERE "+dates+")";
+  }
+
   const values: unknown[] = [owner, space.active_version ?? ""],
     where = ["c.owner=?", "c.version=?"];
   if (f?.search?.trim()) {
@@ -520,16 +463,6 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
     where.push("(m.fetched_at<? OR json_extract(m.data,'$.partial')=1)");
     values.push(Date.now() - p.staleHours * 3600000);
   }
-  if (["lastSoldAt", "fetchedAt"].includes(f?.dateField ?? "")) {
-    if (f?.dateFrom && Number.isFinite(Date.parse(f.dateFrom))) {
-      where.push(e[f.dateField] + ">=?");
-      values.push(Date.parse(f.dateFrom));
-    }
-    if (f?.dateTo && Number.isFinite(Date.parse(f.dateTo))) {
-      where.push(e[f.dateField] + "<?");
-      values.push(Date.parse(f.dateTo) + 86400000);
-    }
-  }
   if (input.selected?.length) {
     where.push("c.card_key IN (SELECT value FROM json_each(?))");
     values.push(JSON.stringify(input.selected));
@@ -549,7 +482,7 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
     select +
     // Pin the card lookup index: SQLite otherwise favors row order and scans
     // the entire inventory once per card on large imports.
-    ",r.row_no AS rowNo,json_extract(m.data,'$.granularity') AS granularity,json_extract(m.data,'$.lowerBound') AS lowerBound,COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0) AS analyzed,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN inventory_rows r ON r.id=(SELECT id FROM inventory_rows INDEXED BY rows_card WHERE owner=c.owner AND version=c.version AND card_key=c.card_key ORDER BY row_no LIMIT 1) WHERE " +
+    ",r.row_no AS rowNo,json_extract(m.data,'$.granularity') AS granularity,json_extract(m.data,'$.historyRange') AS historyRange,json_extract(m.data,'$.lowerBound') AS lowerBound,COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0) AS analyzed,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN inventory_rows r ON r.id=(SELECT id FROM inventory_rows INDEXED BY rows_card WHERE owner=c.owner AND version=c.version AND card_key=c.card_key ORDER BY row_no LIMIT 1) WHERE " +
     where.join(" AND ") +
     " ORDER BY " +
     order +
@@ -568,7 +501,7 @@ export async function queryCards(owner: string, input: QueryInput) {
     .prepare(
       "WITH result AS (" +
         query.sql +
-        ") SELECT COUNT(*) AS matches,COALESCE(SUM(quantity),0) AS units,SUM(inventoryValue) AS value,COUNT(marketPrice) AS priced,MAX(fetchedAt) AS lastRefreshed FROM result",
+        ") SELECT COUNT(*) AS matches,COALESCE(SUM(quantity),0) AS units,NULL AS value,0 AS priced,MAX(fetchedAt) AS lastRefreshed FROM result",
     )
     .bind(...query.values)
     .first();

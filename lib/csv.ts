@@ -11,7 +11,6 @@ const aliases: Record<string, string[]> = {
   condition: ["condition"],
   printing: ["printing", "variant", "foiltype", "finish"],
   language: ["language"],
-  originalPrice: ["tcgmarketplaceprice", "listingprice", "yourprice", "price"],
 };
 export function parseCSV(text: string) {
   text = text.replace(/^\uFEFF/, "");
@@ -129,7 +128,6 @@ export function prepareImport(
     occurrences.set(productId, occurrence + 1);
     // Keep every CSV row, including repeated products, with stable occurrence IDs.
     const key = "product:" + productId + "|row:" + occurrence;
-    const price = Number(get("originalPrice").replace(/[$,]/g, ""));
     return {
       info: {
         key,
@@ -143,10 +141,6 @@ export function prepareImport(
         printing,
         language,
         quantity,
-        originalPrice:
-          get("originalPrice") && Number.isFinite(price) && price >= 0
-            ? price
-            : null,
       },
       raw: Object.fromEntries(headers.map((header, i) => [header, record[i]])),
     };

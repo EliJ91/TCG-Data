@@ -1,6 +1,6 @@
 # SortSwift Market
 
-React inventory workbench with persistent Cloudflare D1 storage, a GitHub Pages front end, and a dedicated Cloudflare Worker backend. The original Vinext entry remains available during migration. Original CSV values remain separate from retrieved market data. The app supports large imports, updates, replacement, search, filters, configurable columns, scoring and exports.
+React inventory workbench with persistent Cloudflare D1 storage, a GitHub Pages front end, and a dedicated Cloudflare Worker backend. The original Vinext entry remains available during migration. Original CSV values remain separate from retrieved market data. The app supports large imports, updates, replacement, search, filters, configurable columns, sales-date filters and exports.
 
 ## API.SH configuration
 
@@ -8,7 +8,7 @@ Configure the backend secret `API_SH_API_KEY`. It is never accepted from or retu
 
 The existing provider monthly spending limit of 1,000 credits is never changed. The app reads `/v1/account`, `/v1/account/usage` and `/v1/account/logs` for free. Only `credits.free` is used as the free balance. Combined, plan and purchased balances are excluded. Provider `free_resets_at` and UTC spending information determine resets. A separate app ceiling never exceeds 1,000 monthly credits.
 
-Every on-demand pull shows its credit estimate before confirmation. The only paid request allowed is `/tcgplayer/v1/price-history?id=PRODUCT_ID&range=month`, one credit per unique product, including all variants. Product/pricing and listing endpoints are blocked before reserving credits. Old saved options and old refresh runs cannot enable those requests. Fresh persistent local cache is reused without a provider call. Provider cache hits still cost credits and are accounted normally.
+Every on-demand pull shows its API credit estimate before confirmation. The only paid request allowed is the sales-history endpoint with `range=annual`, `raw=0`, and a field projection for product/SKU identifiers, dates and quantities sold. This retrieves the widest history API.SH provides: up to one year of weekly totals. It remains one credit per unique Product ID. Product/pricing and listing endpoints are blocked before reserving credits. Extra fields are stripped before cached responses are saved. Compatible older annual cache entries are reused without another paid request.
 
 D1 transactions reserve the free allowance before requests, shared by provider account. Reservations also enforce the approved refresh budget. Costs from headers and response metadata are recorded even on unsuccessful lookups. Uncertain requests are charged conservatively and force reconciliation. Interrupted reservations are never automatically refunded. No automatic paid retries, purchases, plan changes or spending-limit writes exist.
 
@@ -18,9 +18,11 @@ Imports ask only which column contains TCGplayer Product IDs (numeric IDs or pro
 
 The table shows original CSV columns followed by market columns. Column selections and order save automatically and survive later uploads. Previously hidden headers stay hidden when they return; newly encountered CSV headers are shown automatically. Search includes all original values. The analysis CSV export appends market columns to the original columns, with distinct labels for collisions.
 
-Only the explicit **Pull Market Data** action starts a market lookup, after the credit estimate. It checks the entire inventory for missing or outdated daily history; table filters are applied to the saved data afterward. There are no period or extra-data selections in the pull dialog. Product-only rows show sales combined across all returned SKUs; the Sales coverage column identifies this. Variant prices stay unavailable when several variants exist. Exact rolling sales totals require complete daily data for every included SKU. Repeated products share one API request. Legacy SKU-specific rows still require an exact matching variant.
+Only the explicit **Pull Sales History** action starts a lookup after the credit estimate. It retrieves full available history for the inventory, or the explicitly selected rows, independently of the table's date filter. There are no period or extra-data selections before pulling.
 
-Monthly history is daily; longer history is weekly. Exact rolling totals require every completed UTC daily bucket in the period. Missing buckets are unknown, never zero. Average units per day uses reported completed daily buckets only. Weekly data is never presented as exact daily sales. Listing/seller samples are not total supply.
+The table appends quantities sold, sales coverage and available history dates. It has no generated price, fee, profitability, valuation or listing metrics. Original CSV columns remain intact. Product-only rows combine counts across all returned variants; legacy SKU rows match their exact variant.
+
+After pulling, From/To controls recalculate Units sold using saved bucket dates. Sorting, numeric filters, charts and appended CSV exports use the selected dates without provider calls. Annual buckets are weekly: the interface identifies them as whole reported weekly totals, never exact individual-day sales. Missing data remains N/A; a reported zero is zero. Repeated pulls replace matching bucket dates and preserve older saved annual buckets rather than double-counting them. Older cached history is readable without a paid refresh.
 
 ## Hosting and privacy
 

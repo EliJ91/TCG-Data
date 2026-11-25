@@ -942,6 +942,18 @@ tbody tr:last-child td {
   scrollbar-gutter: stable;
   padding-inline-end: 8px;
 }
+.sales-date-filter {
+  display: flex;
+  align-items: flex-end;
+  flex-wrap: wrap;
+  gap: 12px 18px;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+}
+.sales-date-filter > strong { align-self: center; }
+.sales-date-filter label { display: grid; gap: 5px; font-size: 14px; min-width: 0; }
+.sales-date-filter input { max-width: 100%; }
+.sales-date-filter p { flex-basis: 100%; margin: 0; line-height: 1.6; }
 .column-option {
   display: grid;
   grid-template-columns: 28px minmax(0, 1fr);

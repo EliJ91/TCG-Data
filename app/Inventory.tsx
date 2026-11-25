@@ -23,6 +23,8 @@ import {
 } from "lucide-react";
 import {
   inventoryColumns,
+  marketColumns,
+  normalizeFilters,
   csvColumnKey,
   defaults,
   emptyFilters,
@@ -38,6 +40,8 @@ const HistoryChart = lazy(() => import("./HistoryChart"));
 type RecordValue = Record<string, any>;
 type Metadata = {
   headers: string[];
+  historyFrom: number | null;
+  historyTo: number | null;
   filename: string | null;
   importedAt: number | null;
   updatedAt: number | null;
@@ -52,7 +56,6 @@ type Metadata = {
   importing: string | null;
   uniqueCards: number;
   totalCards: number;
-  inventoryValue: number | null;
   refresh: RecordValue | null;
 };
 type Result = {
@@ -61,8 +64,6 @@ type Result = {
   pageSize: number;
   matches: number;
   units: number;
-  value: number | null;
-  priced: number;
   lastRefreshed: number | null;
 };
 const initialResult: Result = {
@@ -71,8 +72,6 @@ const initialResult: Result = {
   pageSize: 50,
   matches: 0,
   units: 0,
-  value: null,
-  priced: 0,
   lastRefreshed: null,
 };
 async function api<T = any>(
@@ -214,21 +213,11 @@ function runImportWorker(
   });
 }
 const quickViews = [
-  ["all", "All inventory"],
-  ["top50", "Recommended top 50"],
-  ["top100", "Recommended top 100"],
-  ["fastest", "Fastest selling"],
-  ["demand", "Highest demand"],
-  ["competition", "Lowest competition"],
-  ["value", "Highest value"],
-  ["net", "Highest net proceeds"],
-  ["increasing", "Increasing demand"],
-  ["decreasing", "Decreasing demand"],
-  ["slow", "Slow-moving inventory"],
-  ["noSales", "No reported recent sales"],
-  ["missing", "Missing market data"],
-  ["outdated", "Outdated market data"],
+  ["all", "All inventory"], ["most", "Most sold"], ["least", "Least sold"],
+  ["noSales", "Zero reported sales"], ["missing", "Missing sales history"], ["outdated", "Outdated sales history"],
 ];
+const dateInput = (value: number | null | undefined) => value == null ? "" : new Date(value).toISOString().slice(0,10);
+
 const dateLabel = (value: number | null | undefined) =>
   value
     ? new Date(value).toLocaleString(undefined, {
@@ -266,8 +255,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     [dropColumn, setDropColumn] = useState<string | null>(null);
   const touchDrag = useRef<string | null>(null);
   const [card, setCard] = useState<RecordValue | null>(null),
-    [cardLoading, setCardLoading] = useState(false),
-    [historyType, setHistoryType] = useState("market");
+    [cardLoading, setCardLoading] = useState(false);
   const [file, setFile] = useState<{
     name: string;
     text: string;
@@ -301,6 +289,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   latest.current = { filters, sort, direction, meta };
   const hasInventory = !!meta?.filename;
   const columns = inventoryColumns(meta?.headers ?? []);
+  const selectedCardRow = result.rows.find(row => row.key === card?.card?.key);
   const hasFilters =
     !!filters.search ||
     filters.numeric.length > 0 ||
@@ -323,6 +312,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const showError = (problem: unknown) =>
     setError(problem instanceof Error ? problem.message : String(problem));
   const changeFilters = (next: Filters) => {
+    setError("");
     setFilters(next);
     setPage(1);
     setSelected(new Set());
@@ -347,7 +337,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             localStorage.getItem("sortswift-view") ?? "null",
           );
           if (saved) {
-            setFilters({ ...emptyFilters, ...saved.filters });
+            setFilters(normalizeFilters(saved.filters));
             setSearch(saved.filters?.search ?? "");
             setSort(saved.sort ?? "rowNo");
             setDirection(saved.direction ?? "asc");
@@ -424,46 +414,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       ? settings.presets[Number(value.slice(6))]
       : null;
     if (saved) {
-      setFilters(saved.filters);
+      setFilters(normalizeFilters(saved.filters));
       setSearch(saved.filters.search);
       setSort(saved.sort);
       setDirection(saved.direction);
       return;
     }
-    const next: Filters = structuredClone(emptyFilters);
-    let field = value === "all" ? "rowNo" : "priority",
-      dir = value === "all" ? "asc" : "desc";
-    if (value === "top50") next.limit = 50;
-    if (value === "top100") next.limit = 100;
-    if (value === "top50" || value === "top100")
-      next.numeric = [{ field: "netProceeds", min: "0.01", max: "" }];
-    if (value === "fastest") field = "dailySales";
-    if (value === "demand") field = "demandScore";
-    if (value === "competition") {
-      field = "sampleSellers";
-      dir = "asc";
-    }
-    if (value === "value") field = "inventoryValue";
-    if (value === "net") field = "netProceeds";
-    if (value === "increasing" || value === "decreasing") {
-      field = "salesTrend";
-      next.numeric = [
-        {
-          field,
-          min: value === "increasing" ? "0.01" : "",
-          max: value === "decreasing" ? "-0.01" : "",
-        },
-      ];
-    }
-    if (value === "slow") {
-      field = "dailySales";
-      dir = "asc";
-      next.numeric = [{ field, min: "0", max: "0.25" }];
-    }
-    if (value === "noSales") {
-      field = "units14";
-      next.numeric = [{ field, min: "0", max: "0" }];
-    }
+    const next: Filters = {...structuredClone(emptyFilters), dateFrom: filters.dateFrom, dateTo: filters.dateTo};
+    const field = value === "all" ? "rowNo" : "unitsSold";
+    const dir = value === "least" || value === "all" ? "asc" : "desc";
+    if (value === "noSales") next.numeric = [{field: "unitsSold", min: "0", max: "0"}];
     if (value === "missing" || value === "outdated") next.freshness = value;
     setFilters(next);
     setSort(field);
@@ -682,7 +642,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const openCard = async (row: RecordValue) => {
     setCardLoading(true);
     setCard({ card: row });
-    setHistoryType("market");
     try {
       setCard(await api("card?key=" + encodeURIComponent(row.key)));
     } catch (problem) {
@@ -779,7 +738,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 }}
               >
                 <RefreshCw size={16} />
-                Pull Market Data
+                Pull Sales History
               </button>
             </div>
           )}
@@ -973,7 +932,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                           (values) => values.length,
                         ).length +
                         (filters.freshness !== "all" ? 1 : 0) +
-                        (filters.search ? 1 : 0)}
+                        (filters.search ? 1 : 0) +
+                        (filters.dateFrom || filters.dateTo ? 1 : 0)}
                     </span>
                   )}
                 </button>
@@ -1000,6 +960,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               </div>
             </div>
           )}
+          {hasInventory && <section className="sales-date-filter" aria-label="Sales date range">
+            <strong>Sales dates</strong>
+            <label>From<input aria-label="Sales from" type="date" max={filters.dateTo || undefined} value={filters.dateFrom} onChange={event => changeFilters({...filters, dateFrom: event.target.value})}/></label>
+            <label>To<input aria-label="Sales to" type="date" min={filters.dateFrom || undefined} value={filters.dateTo} onChange={event => changeFilters({...filters, dateTo: event.target.value})}/></label>
+            <button className="button small-button" disabled={!filters.dateFrom && !filters.dateTo} onClick={() => changeFilters({...filters,dateFrom:"",dateTo:""})}>All dates</button>
+            <p className="small muted">{meta?.historyFrom != null && meta?.historyTo != null ? "Saved history: " + dateInput(meta.historyFrom) + " to " + dateInput(meta.historyTo) + ". " : "Pull sales history to load the available dates. "}Filters use saved quantities only. Weekly totals are selected by their reported date; exact daily counts are unavailable.</p>
+          </section>}
           {advanced && (
             <section className="filter-panel" aria-label="Advanced filters">
               <div className="filter-categories">
@@ -1108,7 +1075,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                       ...filters,
                       numeric: [
                         ...filters.numeric,
-                        { field: "marketPrice", min: "", max: "" },
+                        { field: "unitsSold", min: "", max: "" },
                       ],
                     })
                   }
@@ -1135,44 +1102,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                     <option value="unanalyzed">Unanalyzed</option>
                     <option value="outdated">Outdated</option>
                   </select>
-                </label>
-                <label>
-                  Date field
-                  <select
-                    value={filters.dateField}
-                    onChange={(event) =>
-                      changeFilters({
-                        ...filters,
-                        dateField: event.target.value,
-                      })
-                    }
-                  >
-                    <option value="fetchedAt">Market refreshed</option>
-                    <option value="lastSoldAt">Last verified sale</option>
-                  </select>
-                </label>
-                <label>
-                  From
-                  <input
-                    type="date"
-                    value={filters.dateFrom}
-                    onChange={(event) =>
-                      changeFilters({
-                        ...filters,
-                        dateFrom: event.target.value,
-                      })
-                    }
-                  />
-                </label>
-                <label>
-                  To
-                  <input
-                    type="date"
-                    value={filters.dateTo}
-                    onChange={(event) =>
-                      changeFilters({ ...filters, dateTo: event.target.value })
-                    }
-                  />
                 </label>
                 <div className="filter-save">
                   <button
@@ -1324,20 +1253,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                                   {row.language || "Language not specified"}
                                 </span>
                               </div>
-                            ) : column.kind === "score" &&
-                              row[column.key] !== null ? (
-                              <span
-                                className={
-                                  "score " +
-                                  (row[column.key] >= 70
-                                    ? "strong"
-                                    : row[column.key] >= 40
-                                      ? "medium"
-                                      : "")
-                                }
-                              >
-                                {formatValue(row[column.key], column.kind)}
-                              </span>
                             ) : (
                               <span
                                 className={
@@ -1374,12 +1289,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               <div className="table-footer">
                 <div>
                   <strong>{result.matches.toLocaleString()}</strong> matching
-                  cards<span>·</span>
-                  <strong>{formatValue(result.value, "money")}</strong> matching
-                  value{" "}
-                  <span className="muted">
-                    ({result.priced.toLocaleString()} priced)
-                  </span>
+                  rows
                   {loading && <LoaderCircle size={15} className="spin" />}
                 </div>
                 <div className="pagination">
@@ -1461,10 +1371,10 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         <footer className="workspace-footer">
           <span>
             <Clock3 size={14} />
-            Market last refreshed {dateLabel(result.lastRefreshed)}
+            Sales history updated {dateLabel(result.lastRefreshed)}
           </span>
           <span>
-            USD · N/A means unavailable ·{" "}
+            N/A means no reported quantity ·{" "}
             <a
               href="https://api.sh/docs/tcgplayer-price-history"
               target="_blank"
@@ -1522,7 +1432,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 {file.headers.map(header => <option key={header}>{header}</option>)}
               </select>
             </label>
-            <p className="small muted">Use the Product ID from a TCGplayer product link, or the link itself. Keep SKU numbers in their original column. All rows and columns are preserved. Sales cover all variants of each product and are only requested when you select Pull Market Data.</p>
+            <p className="small muted">Use the Product ID from a TCGplayer product link, or the link itself. Keep SKU numbers in their original column. All rows and columns are preserved. Sales cover all variants of each product and are only requested when you select Pull Sales History.</p>
             {file.mode === "replace" && (
               <label className="check-label danger-text">
                 <input
@@ -1603,92 +1513,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               <button className="button" onClick={()=>{setError("");setModal("account");}}>Account and usage</button>
             </section>
             <section>
-              <h3>Pricing</h3>
-              <div className="settings-grid">
-                {(
-                  [
-                    ["feePercent", "Seller fee (%)"],
-                    ["fixedFee", "Fixed fee ($)"],
-                    ["shipping", "Shipping / card ($)"],
-                    ["minimumPrice", "Minimum listing price ($)"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <label key={key}>
-                    {label}
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.01"
-                      value={settings[key]}
-                      onChange={(event) =>
-                        setSettings({
-                          ...settings,
-                          [key]: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </label>
-                ))}
-              </div>
-              <p className="small muted">
-                Net proceeds = suggested price × (1 − fee %) − fixed fee −
-                shipping. This excludes acquisition costs and taxes. Original
-                CSV prices are preserved.
-              </p>
-            </section>
-            <section>
-              <h3>Listing priority</h3>
-              <div className="settings-grid">
-                {(
-                  [
-                    ["velocityTarget", "Units / day for a 100 velocity score"],
-                    ["velocityWeight", "Velocity weight"],
-                    ["demandWeight", "Demand weight"],
-                    ["profitWeight", "Net proceeds weight"],
-                  ] as const
-                ).map(([key, label]) => (
-                  <label key={key}>
-                    {label}
-                    <input
-                      type="number"
-                      min="0"
-                      step="0.1"
-                      value={settings[key]}
-                      onChange={(event) =>
-                        setSettings({
-                          ...settings,
-                          [key]: Number(event.target.value),
-                        })
-                      }
-                    />
-                  </label>
-                ))}
-              </div>
-              <details>
-                <summary>How scores are calculated</summary>
-                <p className="small muted">
-                  Velocity = min(100, reported units per covered day ÷ your
-                  target × 100). Demand averages velocity with a sales-trend
-                  score of 50 + half the percentage change, bounded to 0–100.
-                  The net-proceeds score is $10 per card = 100. Listing priority
-                  is the weighted average of these scores. It remains N/A
-                  without sales and pricing data. Competition = 5 × the sellers
-                  in the returned listing sample, capped at 100. A lower
-                  competition score means fewer sampled sellers.
-                </p>
-              </details>
-            </section>
-            <section>
               <h3>Refresh preferences</h3>
               <div className="settings-grid">
                 <label>Maximum products per refresh<input type="number" min="1" max="1000" value={settings.maxProducts} onChange={e=>setSettings({...settings,maxProducts:Number(e.target.value)})}/></label>
                 <label>Outdated after (hours)<input type="number" min="1" value={settings.staleHours} onChange={e=>setSettings({...settings,staleHours:Number(e.target.value)})}/></label>
               </div>
               <label className="check-label"><input type="checkbox" checked={settings.prioritizeUnanalyzed} onChange={e=>setSettings({...settings,prioritizeUnanalyzed:e.target.checked})}/>Analyze new products first</label>
-              <p className="small muted">Every refresh shows its estimated cost first. Results are kept across monthly resets so you can continue analyzing a large inventory over time.</p>
+              <p className="small muted">Every pull shows the required API credits first. Results are kept across monthly resets so you can continue analyzing a large inventory over time.</p>
             </section>
             <details className="data-notes"><summary>Data coverage</summary>
-              <p className="small muted">Monthly history supplies daily buckets. Longer ranges supply weekly buckets. Exact rolling totals require complete daily coverage; missing or unanalyzed data remains N/A. A listing sample is not total marketplace supply.</p>
+              <p className="small muted">Pulls retrieve the widest available sales history: up to one year of weekly quantity totals. Filter saved totals by their reported dates afterward. Missing or unanalyzed quantities remain N/A.</p>
               <p className="small muted">A TCGplayer SKU is different from a Product ID. Include a Product ID column in your CSV, or add the ID from the TCGplayer product URL in card details. The returned SKU must match before sales are assigned.</p>
               <a href="https://api.sh/docs/tcgplayer-price-history" target="_blank" rel="noreferrer">Provider documentation <ExternalLink size={12}/></a>
             </details>
@@ -1830,12 +1664,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       {modal === "refresh" && (
         <Modal
           error={error}
-          title="Pull Market Data"
+          title="Pull Sales History"
           onClose={() => setModal(null)}
         >
           <div className="modal-body">
             <p className="muted">
-              Pull daily sales history for the past month for {scope === "selected" ? selected.size.toLocaleString() + " selected rows" : "your inventory"}.
+              Pull all sales-quantity history available from the provider (up to one year of weekly totals) for {scope === "selected" ? selected.size.toLocaleString() + " selected rows" : "your inventory"}.
               Filter the saved results however you like afterward.
             </p>
             <div className="estimate">
@@ -1846,7 +1680,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 </p>
               ) : plan ? (
                 <>
-                  <span className="eyebrow">ESTIMATED COST</span>
+                  <span className="eyebrow">API CREDITS REQUIRED</span>
                   <strong>
                     {plan.minimumCredits === plan.maximumCredits
                       ? plan.maximumCredits.toLocaleString()
@@ -1893,7 +1727,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 onClick={() => void runRefresh()}
               >
                 <RefreshCw size={16} />
-                Pull Market Data
+                Pull Sales History
               </button>
             )}
           </div>
@@ -1934,14 +1768,14 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               >
                 <option value="original">Original CSV columns</option>
                 <option value="analysis">
-                  Original CSV with market data appended
+                  Original CSV with sales counts appended
                 </option>
               </select>
             </label>
             <p className="muted small">
               {exportAnalysis
                 ? "Analysis exports include the available retrieved values. Missing values are blank."
-                : "Your original column names and values are preserved. Retrieved market data does not overwrite your CSV."}
+                : "Your original column names and values are preserved. Sales counts do not overwrite your CSV."}
             </p>
           </div>
           <div className="modal-footer">
@@ -2071,10 +1905,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                       {card.detail?.product?.productId ||
                         card.card.productId ||
                         "N/A"}{" "}
-                      · {card.card.quantity} owned
                     </p>
                     <p className="small muted">
-                      Market refreshed {dateLabel(card.fetchedAt)}
+                      Sales history updated {dateLabel(card.fetchedAt)}
                     </p>
                   </div>
                 </div>
@@ -2083,59 +1916,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   <p className="small muted">Use the number after /product/ in this card's TCGplayer URL. This saves a mapping without spending credits or changing your original CSV. The history response must contain the matching SKU.</p>
                   <div className="actions"><input aria-label="TCGplayer Product ID" inputMode="numeric" placeholder="Product ID" value={productDraft} onChange={e=>setProductDraft(e.target.value)}/><button className="button" disabled={!/^\d+$/.test(productDraft)||activeRefresh} onClick={()=>void api("market/product",{key:card.card.key,productId:productDraft}).then(()=>{setProductDraft("");setCard(null);return loadMetadata();}).then(()=>setNotice("Product ID saved. Refresh market data to verify the SKU.")).catch(showError)}>Save Product ID</button></div>
                 </details>}
-                {card.detail && (
-                  <>
-                    <div
-                      className="chart-tabs"
-                      role="group"
-                      aria-label="History chart"
-                    >
-                      <button
-                        className={historyType === "market" ? "active" : ""}
-                        onClick={() => setHistoryType("market")}
-                      >
-                        Market prices
-                      </button>
-                      <button
-                        className={historyType === "units" ? "active" : ""}
-                        onClick={() => setHistoryType("units")}
-                      >
-                        Sales volume
-                      </button>
-                      <button
-                        className={historyType === "sales" ? "active" : ""}
-                        onClick={() => setHistoryType("sales")}
-                      >
-                        Sale price ranges
-                      </button>
-                    </div>
-                    <Suspense fallback={<p className="muted">Loading chart…</p>}><HistoryChart
-                      history={card.detail.history ?? []}
-                      type={historyType}
-                    /></Suspense>
-                    <p className="small muted">
-                      History uses {card.detail.granularity ?? "source"} buckets. {card.detail.coveredDays ?? 0} completed daily buckets are available in the latest 30-day window. Missing totals remain N/A.
-                    </p>
-                  </>
-                )}
+                {card.detail && <>
+                  <h3>Units sold</h3>
+                  <Suspense fallback={<p className="muted">Loading chart…</p>}><HistoryChart history={(card.detail.history ?? []).filter((point: RecordValue) => (!filters.dateFrom || point.date >= Date.parse(filters.dateFrom)) && (!filters.dateTo || point.date < Date.parse(filters.dateTo) + 86400000))}/></Suspense>
+                  <p className="small muted">Weekly totals are selected by their reported date. Exact daily counts are not available.</p>
+                </>}
                 <div className="detail-metrics">
-                  {columns
-                    .filter(
-                      (column) =>
-                        ![
-                          "name",
-                          "number",
-                          "set",
-                          "productId",
-                          "skuId",
-                          "condition",
-                          "printing",
-                          "rarity",
-                          "language",
-                          "quantity",
-                          "fetchedAt",
-                        ].includes(column.key),
-                    )
+                  {marketColumns
                     .map((column) => (
                       <div key={column.key}>
                         <span title={column.note}>{column.label}</span>
@@ -2146,9 +1933,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                             ? "≥"
                             : ""}
                           {formatValue(
-                            result.rows.find(
-                              (row) => row.key === card.card.key,
-                            )?.[column.key] ?? card.market?.[column.key],
+                            selectedCardRow ? selectedCardRow[column.key] : card.market?.[column.key],
                             column.kind,
                           )}
                         </strong>
@@ -2160,37 +1945,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                     {note}
                   </p>
                 ))}
-                {card.detail?.recentSales?.length > 0 && (
-                  <details>
-                    <summary>
-                      Recent product sales · language and units not reported
-                    </summary>
-                    <div className="import-preview">
-                      <table>
-                        <thead>
-                          <tr>
-                            <th>Date</th>
-                            <th>Condition</th>
-                            <th>Printing</th>
-                            <th>Price including shipping</th>
-                          </tr>
-                        </thead>
-                        <tbody>
-                          {card.detail.recentSales
-                            .slice(0, 20)
-                            .map((sale: RecordValue, index: number) => (
-                              <tr key={index}>
-                                <td>{sale.date}</td>
-                                <td>{sale.condition}</td>
-                                <td>{sale.variant}</td>
-                                <td>{formatValue(sale.price, "money")}</td>
-                              </tr>
-                            ))}
-                        </tbody>
-                      </table>
-                    </div>
-                  </details>
-                )}
                 <details>
                   <summary>Original CSV values</summary>
                   <p className="small muted">

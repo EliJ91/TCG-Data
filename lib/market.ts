@@ -1,5 +1,5 @@
 import { apiKey, AppError, buildQuery, database, preferences, workspace, type QueryInput } from "./data";
-import { API_SH_BASE, DAY, normalizeMarket, type HistoryRange } from "./api-sh";
+import { API_SH_BASE, DAY, normalizeMarket, salesHistoryPath, salesOnlyResponse, mergeSalesHistory, type HistoryRange } from "./api-sh";
 import { reserveCredits, settleCredits, syncAccount, freeGet } from "./credits";
 export { normalizeMarket } from "./api-sh";
 type Json=Record<string,any>;
@@ -9,11 +9,12 @@ async function saveCache(owner:string,path:string,body:Json) { await database().
 async function activeRun(owner:string,id:string) { const row=await database().prepare("SELECT * FROM refresh_runs WHERE owner=? AND id=?").bind(owner,id).first<Json>(); if(!row||row.status!=="running") throw new AppError("Refresh cancelled or already finished.",409); return row; }
 // Sales history is the only paid endpoint this app may request, including
 // old saved options and refresh runs created before this restriction.
-function paths(id:string) { return ["/tcgplayer/v1/price-history?id="+id+"&range=month"]; }
+function paths(id:string) { return [salesHistoryPath(id)]; }
 export async function provider(owner:string,runId:string,key:string,path:string,staleHours:number) {
-  if(!/^\/tcgplayer\/v1\/price-history\?id=\d+&range=month$/.test(path)) throw new AppError("Only monthly sales-history requests are enabled.",403);
-  const old=await cache(owner,path);
-  if(old&&Date.now()-old.fetched_at<staleHours*3600000) return JSON.parse(old.data);
+  const product=path.match(/^\/tcgplayer\/v1\/price-history\?id=(\d+)&/);
+  if(!product || path!==salesHistoryPath(product[1])) throw new AppError("Only sales-quantity history requests are enabled.",403);
+  const old=await cache(owner,path) ?? await cache(owner,"/tcgplayer/v1/price-history?id="+product[1]+"&range=annual");
+  if(old&&Date.now()-old.fetched_at<staleHours*3600000) {const saved=JSON.parse(old.data);return {...saved,path,body:salesOnlyResponse(saved.body)};}
   await activeRun(owner,runId);
   const reservation=await reserveCredits(owner,runId,path,1);
   let response:Response|null=null,body:Json={},charge;
@@ -23,16 +24,16 @@ export async function provider(owner:string,runId:string,key:string,path:string,
     await database().prepare("UPDATE refresh_runs SET spent=spent+?,detail=json_set(detail,'$.requests',COALESCE(json_extract(detail,'$.requests'),0)+1,'$.failedRequests',COALESCE(json_extract(detail,'$.failedRequests'),0)+?) WHERE id=? AND owner=?").bind(charge.used,response?.ok?0:1,runId,owner).run();
   }
   if(!response?.ok || body.success===false || body.error) throw new AppError("API.SH could not return this product (HTTP "+(response?.status??"timeout")+"). Previous data is preserved.",response?.status===401||response?.status===402||response?.status===403?403:response?.status===429?429:502);
-  const stored={body,requestId:charge.requestId,fetchedAt:Date.now(),path};
+  const stored={body:salesOnlyResponse(body),requestId:charge.requestId,fetchedAt:Date.now(),path};
   await saveCache(owner,path,stored);
   await saveCache(owner,"archive:"+(charge.requestId??reservation.id),stored);
   return stored;
 }
 export async function refreshPlan(owner:string,input:RefreshInput) {
   const space=await workspace(owner),p=preferences(space),q=buildQuery(owner,space,input);
-  const options={range:"month",includePricing:false,includeListings:false,prioritizeUnanalyzed:input.prioritizeUnanalyzed!==false,maxProducts:Math.max(1,Math.min(1000,Math.floor(input.maxProducts??p.maxProducts)))};
-  const rows=await database().prepare("SELECT key,productId,skuId,fetchedAt,partial,available,analyzed,granularity FROM ("+q.sql+")").bind(...q.values).all<Json>();
-  const targets=rows.results.filter(r=>!input.onlyStale||!r.analyzed||r.partial||r.granularity!=="daily"||!r.fetchedAt||r.fetchedAt<Date.now()-p.staleHours*3600000);
+  const options={range:"annual",includePricing:false,includeListings:false,prioritizeUnanalyzed:input.prioritizeUnanalyzed!==false,maxProducts:Math.max(1,Math.min(1000,Math.floor(input.maxProducts??p.maxProducts)))};
+  const rows=await database().prepare("SELECT key,productId,skuId,fetchedAt,partial,available,analyzed,historyRange FROM ("+q.sql+")").bind(...q.values).all<Json>();
+  const targets=rows.results.filter(r=>!input.onlyStale||!r.analyzed||r.partial||r.historyRange!=="annual"||!r.fetchedAt||r.fetchedAt<Date.now()-p.staleHours*3600000);
   const groups=[...new Map(targets.filter(r=>/^\d+$/.test(String(r.productId??""))).map(r=>[String(r.productId),r])).values()].sort((a,b)=>(options.prioritizeUnanalyzed?Number(!!a.analyzed)-Number(!!b.analyzed):0)||Number(a.fetchedAt??0)-Number(b.fetchedAt??0));
   const cached=await database().prepare("SELECT id,fetched_at FROM api_cache WHERE owner=? AND id LIKE ?").bind(owner,owner+"|api-sh:/tcgplayer/%").all<Json>();
   const fresh=new Set(cached.results.filter(r=>r.fetched_at>Date.now()-p.staleHours*3600000).map(r=>r.id));
@@ -42,7 +43,7 @@ export async function refreshPlan(owner:string,input:RefreshInput) {
   const chosen:Json[]=[];
   for(const group of groups) {
     if(chosen.length>=options.maxProducts) break;
-    const needed=paths(String(group.productId)).filter(path=>!fresh.has(owner+"|api-sh:"+path)).length;
+    const needed=paths(String(group.productId)).filter(path=>!fresh.has(owner+"|api-sh:"+path)&&!fresh.has(owner+"|api-sh:/tcgplayer/v1/price-history?id="+group.productId+"&range=annual")).length;
     if(needed>budget) continue;
     chosen.push(group);budget-=needed;cost+=needed;
   }
@@ -64,16 +65,23 @@ export async function startRefresh(owner:string,input:RefreshInput) {
 export async function cancelRefresh(owner:string,id:string) { await database().prepare("UPDATE refresh_runs SET status='cancelled' WHERE owner=? AND id=? AND status='running'").bind(owner,id).run();return {cancelled:true}; }
 async function applyHistory(owner:string,productId:string,history:Json,extras:Json,sources:Json,issues:string[]=[],fetchedAt=Date.now()) {
   if(String(history.product_id)!==productId||!Array.isArray(history.series)) throw new AppError("API.SH returned an unexpected product. Previous data is preserved.",502);
-  if(history.currency && history.currency!=="USD") throw new AppError("The provider returned a non-USD history. Previous data is preserved.",502);
   const space=await workspace(owner),skuIds=history.series.filter((s:any)=>s&&typeof s==="object"&&/^\d+$/.test(String(s.sku))).map((s:any)=>String(s.sku));
   for(const sku of skuIds) await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data").bind(owner+"|sku-map:"+sku,owner,Date.now(),JSON.stringify({productId,verified:true})).run();
   const inventory=await database().prepare("SELECT c.card_key,c.info,c.quantity FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE c.owner=? AND c.version=? AND (json_extract(c.info,'$.productId')=? OR m.product_id=? OR json_extract(c.info,'$.skuId') IN (SELECT value FROM json_each(?)))").bind(owner,space.active_version??"",productId,productId,JSON.stringify(skuIds)).all<Json>();
   for(const row of inventory.results) {
     const previous=await database().prepare("SELECT data,detail,fetched_at FROM market WHERE owner=? AND card_key=?").bind(owner,row.card_key).first<Json>();
-    if(previous && previous.fetched_at>fetchedAt && !(history.range==="month" && JSON.parse(previous.data).granularity!=="daily"))continue;
+    if(previous && previous.fetched_at>fetchedAt && JSON.parse(previous.data).historyRange==="annual")continue;
     const normalized=normalizeMarket({...JSON.parse(row.info),quantity:row.quantity},history,extras,fetchedAt);
     if(!normalized.metrics.available && previous && JSON.parse(previous.data).available)continue;
     normalized.metrics.partial=issues.length>0;
+    const oldDetail=previous?JSON.parse(previous.detail):null;
+    if(oldDetail?.range===history.range && Array.isArray(oldDetail.history)) {
+      const older=oldDetail.history.filter((point:Json)=>Number.isFinite(point.date)&&(normalized.metrics.historyFrom===null||point.date<normalized.metrics.historyFrom));
+      if(older.length) normalized.metrics.unitsSold=normalized.metrics.unitsSold!==null&&older.every((point:Json)=>point.units!==null&&point.units>=0)?normalized.metrics.unitsSold+older.reduce((sum:number,point:Json)=>sum+point.units,0):null;
+      normalized.detail.history=mergeSalesHistory(oldDetail.history,normalized.detail.history);
+      normalized.metrics.historyFrom=normalized.detail.history[0]?.date??null;
+      normalized.metrics.historyTo=normalized.detail.history.at(-1)?.date??null;
+    }
 
     await database().prepare("INSERT INTO market (id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET product_id=excluded.product_id,fetched_at=excluded.fetched_at,data=excluded.data,detail=excluded.detail").bind(owner+"|"+row.card_key,owner,row.card_key,productId,fetchedAt,JSON.stringify(normalized.metrics),JSON.stringify({...normalized.detail,sources,issues})).run();
   }
@@ -106,7 +114,7 @@ export async function refreshStep(owner:string,runId:string,cardKey:string) {
 export async function recoverResult(owner:string,id:string) {
   const row=await database().prepare("SELECT * FROM api_requests WHERE id=? AND owner=?").bind(id,owner).first<Json>();
   if(!row?.request_id || Date.now()-row.created_at>=30*DAY) throw new AppError("This request has no recoverable result within API.SH's 30-day retention.",410);
-  const body=await freeGet(await apiKey(await workspace(owner)),"/v1/results/"+encodeURIComponent(row.request_id));
+  const body=salesOnlyResponse(await freeGet(await apiKey(await workspace(owner)),"/v1/results/"+encodeURIComponent(row.request_id)));
   // Recovered bodies repeat original credits_used; this is a free read, never a new charge.
   await saveCache(owner,row.path,{body,requestId:row.request_id,fetchedAt:row.created_at,path:row.path,recoveredAt:Date.now()});
   if(row.path.startsWith("/tcgplayer/v1/price-history?")) await applyHistory(owner,String(body.product_id),body,{},[{requestId:row.request_id,recovered:true}],[],row.created_at);

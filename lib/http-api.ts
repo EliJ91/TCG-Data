@@ -91,10 +91,14 @@ export async function handleApi(request:Request,owner:string,path:string,allowed
           )
           .bind(owner, space.active_version ?? "", key)
           .all<{ raw: string }>();
+        const savedMarket=market?JSON.parse(market.data):null, savedDetail=market?JSON.parse(market.detail):null;
+        const salesMarket=savedMarket?Object.fromEntries(["scope","analyzed","available","granularity","historyRange","unitsSold","historyFrom","historyTo"].map(field=>[field,savedMarket[field]??null])):null;
+        const salesDetail=savedDetail?{product:{productId:savedDetail.product?.productId},history:(savedDetail.history??[]).map((point:any)=>({date:point.date,units:point.units})),granularity:savedDetail.granularity,range:savedDetail.range,notes:["Dates select reported "+(savedDetail.granularity==="daily"?"daily":"weekly")+" quantity totals."]}:null;
+        const {originalPrice: _originalPrice,...cardInfo}=JSON.parse(card.info);
         return Response.json({
-          card: { ...JSON.parse(card.info), quantity: card.quantity },
-          market: market ? JSON.parse(market.data) : null,
-          detail: market ? JSON.parse(market.detail) : null,
+          card: { ...cardInfo, quantity: card.quantity },
+          market: salesMarket,
+          detail: salesDetail,
           fetchedAt: market?.fetched_at,
           originals: raw.results.map((row) => JSON.parse(row.raw)),
         });

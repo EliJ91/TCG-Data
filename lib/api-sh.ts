@@ -31,61 +31,45 @@ export function variantMatches(info: Json, row: Json) {
   const finish = info.printing || String(info.condition ?? "").match(/reverse\s*holofoil|reverse\s*foil|holofoil|etched\s*foil|foil/i)?.[0];
   return (!info.skuId || String(row.sku) === String(info.skuId)) && (!info.condition || condition(info.condition) === condition(row.condition)) && (!finish || printing(finish) === printing(row.printing)) && (!info.language || language(info.language) === language(row.language));
 }
-function productSeries(series: Json[]) {
-  if (new Set(series.map(row => String(row.sku))).size !== series.length) return null;
-  const bySku = series.map(row => Array.isArray(row.points) ? row.points : []);
-  const dates = [...new Set(bySku.flatMap(points => points.filter((p: any) => p && typeof p.date === "string").map((p: any) => p.date)))];
-  return {points: dates.map(date => {
-    const buckets = bySku.map(points => points.filter((p: any) => p?.date === date));
-    const complete = buckets.every(matches => matches.length === 1);
-    const sum = (key: string) => complete && buckets.every(matches => numberOrNull(matches[0][key]) !== null && Number(matches[0][key]) >= 0)
-      ? buckets.reduce((total, matches) => total + Number(matches[0][key]), 0) : null;
-    return {date, quantity_sold: sum("quantity_sold"), transactions: sum("transactions")};
-  })};
+export const SALES_FIELDS = ["product_id", "range", "series.sku", "series.condition", "series.printing", "series.language", "series.total_quantity_sold", "series.points.date", "series.points.quantity_sold"];
+export const salesHistoryPath = (id: string) => "/tcgplayer/v1/price-history?id=" + id + "&range=annual&raw=0&fields=" + encodeURIComponent(SALES_FIELDS.join(","));
+export function salesOnlyResponse(body: Json): Json {
+  const result: Json = {};
+  for (const key of ["product_id", "range", "cached", "fetched_at", "credits_used", "success", "error"]) if (key in body) result[key] = body[key];
+  if (Array.isArray(body.series)) result.series = body.series.filter((row: any) => row && typeof row === "object").map((row: any) => ({
+    sku: row.sku, condition: row.condition, printing: row.printing, language: row.language,
+    total_quantity_sold: row.total_quantity_sold,
+    points: (Array.isArray(row.points) ? row.points : []).filter((point: any) => point && typeof point === "object").map((point: any) => ({date: point.date, quantity_sold: point.quantity_sold})),
+  }));
+  return result;
 }
-export function normalizeMarket(info: Json, body: Json, extras: Json = {}, now = Date.now()) {
-  const candidates = (Array.isArray(body.series) ? body.series : []).filter((s: any) => s && typeof s === "object" && variantMatches(info, s));
-  const aggregate = !info.skuId && !info.condition && !info.printing && !info.language && candidates.length > 1;
-  const sku = candidates.length === 1 ? candidates[0] : aggregate ? productSeries(candidates) : null;
+const quantity = (value: any) => {const n = numberOrNull(value);return n !== null && n >= 0 ? n : null;};
+export function normalizeMarket(info: Json, input: Json, _extras: Json = {}, _now = Date.now()) {
+  const body = salesOnlyResponse(input);
+  const candidates = (body.series ?? []).filter((row: Json) => variantMatches(info, row));
+  const aggregate = !info.skuId && !info.condition && !info.printing && !info.language;
+  const available = candidates.length > 0 && (aggregate || candidates.length === 1) && new Set(candidates.map((row: Json) => String(row.sku))).size === candidates.length;
+  const sources: Json[][] = available ? candidates.map((row: Json) => row.points) : [];
+  const dates = [...new Set<string>(sources.flatMap(points => points.map(point => point.date)))];
+  const history = dates.map(date => {
+    const buckets = sources.map(points => points.filter(point => point.date === date));
+    const complete = buckets.every(points => points.length === 1 && quantity(points[0].quantity_sold) !== null);
+    return {date: Date.parse(date), units: complete ? buckets.reduce((sum, points) => sum + Number(points[0].quantity_sold), 0) : null};
+  }).filter(point => Number.isFinite(point.date)).sort((a,b) => a.date-b.date);
+  const totals = candidates.map((row: Json) => quantity(row.total_quantity_sold));
+  const total = available && totals.every((n: number | null) => n !== null) ? totals.reduce((sum: number,n: number) => sum+n,0)
+    : history.length && history.every(point => point.units !== null) ? history.reduce((sum,point) => sum+point.units!,0) : null;
   const granularity = body.range === "month" ? "daily" : "weekly";
-  const history = (Array.isArray(sku?.points) ? sku.points : []).filter((p: any) => p && typeof p === "object").map((p: any) => ({ date: Date.parse(p.date), units: numberOrNull(p.quantity_sold), transactions: numberOrNull(p.transactions), market: numberOrNull(p.market_price), low: numberOrNull(p.low_sale_with_shipping) ?? numberOrNull(p.low_sale), high: numberOrNull(p.high_sale_with_shipping) ?? numberOrNull(p.high_sale) })).filter((p: any) => Number.isFinite(p.date)).sort((a: any,b: any) => a.date-b.date);
-  const metrics: Json = { scope: sku ? aggregate ? "Product · all SKUs" : "Exact SKU" : "Variant not matched", analyzed: true, available: !!sku, lowerBound: false, granularity, provider: "API.SH", marketPrice: null, listingLow: null, listingMedian: null, listingHigh: null, soldAverage: null, soldRecent: null, lastSoldAt: null, daysSinceSale: null, activeListings: null, totalSupply: null, competingSellers: null, listingCount: null, sampleSupply: null, sampleSellers: null, demandSupply: null, daysSupply: null, dailySales: null, salesFrequency: null, transactions30: null, unitsPerTransaction: null, salesTrend: null };
-  const today = Math.floor(now / DAY) * DAY;
-  // Exact completed UTC-day totals require every daily bucket. Never apportion weekly buckets.
-  const window = (days: number, offset = 0) => {
-    if (granularity !== "daily") return null;
-    const rows = [];
-    for (let i = days + offset; i > offset; i--) {
-      const matches = history.filter((p: any) => p.date === today - i * DAY);
-      if (matches.length !== 1 || matches[0].units === null || matches[0].units < 0) return null;
-      rows.push(matches[0]);
-    }
-    return rows;
-  };
-  for (const days of [7,14,30,60,90]) { const rows=window(days); metrics["units"+days] = rows ? rows.reduce((s: number,p: any)=>s+p.units,0) : null; }
-  const recent=window(30), previous=window(30,30);
-  const dailyRows = granularity === "daily" ? history.filter((p: any)=>p.date >= today-30*DAY && p.date < today && p.units !== null && p.units >= 0) : [];
-  const distinctDays = new Set(dailyRows.map((p: any)=>p.date));
-  const coveredDays = distinctDays.size === dailyRows.length ? dailyRows.length : 0;
-  metrics.dailySales = coveredDays ? dailyRows.reduce((s: number,p: any)=>s+p.units,0)/coveredDays : null;
-  const transactions = recent?.every((p: any)=>p.transactions !== null && p.transactions >= 0) ? recent.reduce((s: number,p: any)=>s+p.transactions,0) : null;
-  metrics.transactions30=transactions;
-  metrics.salesFrequency=transactions === null ? null : transactions/30;
-  metrics.unitsPerTransaction=transactions && metrics.units30 !== null ? metrics.units30/transactions : null;
-  const previousUnits=previous?.reduce((s: number,p: any)=>s+p.units,0);
-  metrics.salesTrend=previousUnits && metrics.units30 !== null ? (metrics.units30/previousUnits-1)*100 : null;
-  metrics.marketPrice=[...history].reverse().find((p: any)=>p.market !== null)?.market ?? null;
-  for(const days of [7,30,90]) { const p=history.find((p: any)=>p.date===today-days*DAY && p.market !== null); metrics["change"+days]=p?.market && metrics.marketPrice !== null ? (metrics.marketPrice/p.market-1)*100 : null; }
-  const quote = Array.isArray(extras.product?.skus) ? extras.product.skus.filter((s: any)=>variantMatches(info,s)) : [];
-  if(!aggregate && quote.length===1) { metrics.marketPrice=numberOrNull(quote[0].market_price) ?? metrics.marketPrice; metrics.listingLow=numberOrNull(quote[0].lowest_price); }
-  const listings=(Array.isArray(extras.listings?.listings)?extras.listings.listings:[]).filter((r: any)=>!aggregate && sku && variantMatches({...info,skuId:String(sku.sku)},r));
-  if(listings.length) {
-    const prices=listings.map((r: any)=>numberOrNull(r.price)).filter((n: any)=>n!==null).sort((a: number,b: number)=>a-b);
-    metrics.listingCount=listings.length;
-    metrics.sampleSupply=listings.every((r: any)=>numberOrNull(r.quantity)!==null) ? listings.reduce((s: number,r: any)=>s+Number(r.quantity),0) : null;
-    metrics.sampleSellers=new Set(listings.map((r: any)=>r.seller?.key).filter(Boolean)).size || null;
-    metrics.listingMedian=prices.length ? (prices[Math.floor((prices.length-1)/2)]+prices[Math.floor(prices.length/2)])/2 : null;
-    metrics.listingHigh=prices.at(-1) ?? null;
-  }
-  return {metrics,detail:{product:{...extras.product,productId:body.product_id,imageUrl:extras.product?.image},sku:aggregate?null:sku,history,granularity,range:body.range,coveredDays,listings,notes:[aggregate?"Sales combine all SKUs for this product, including all conditions, printings, and languages. Prices stay N/A because these variants have different prices.":null,!sku?"No unique SKU matched this card. Sales remain N/A; this does not mean zero sales.":null,granularity==="weekly"?"This range contains weekly buckets. Exact daily rates and rolling day totals remain N/A.":"Exact totals cover complete UTC days and require a daily bucket for every day in the window. Missing days remain unknown. Units per day uses only reported completed daily buckets.","Listing and seller samples are not total marketplace supply."].filter(Boolean)}};
+  const scope = available ? aggregate && candidates.length > 1 ? "Product · all SKUs" : "Exact SKU" : "Variant not matched";
+  const metrics: Json = {scope, analyzed: true, available, granularity, historyRange: body.range, unitsSold: total, historyFrom: history[0]?.date ?? null, historyTo: history.at(-1)?.date ?? null};
+  return {metrics, detail: {product: {productId: body.product_id}, history, granularity, range: body.range, notes: [
+    aggregate && candidates.length > 1 ? "Quantities combine all conditions, printings, and languages for this product." : null,
+    !available ? "No matching sales history was returned. Missing counts remain N/A." : null,
+    granularity === "weekly" ? "Dates select the provider's reported weekly totals. Exact individual-day counts are not available." : "Dates select the provider's reported daily totals.",
+  ].filter(Boolean)}};
+}
+export function mergeSalesHistory(previous: Json[], incoming: Json[]) {
+  const points = new Map<number, {date: number; units: number | null}>();
+  for (const point of [...previous, ...incoming]) if (Number.isFinite(point?.date)) points.set(point.date, {date: point.date, units: quantity(point.units)});
+  return [...points.values()].sort((a,b) => a.date-b.date);
 }
