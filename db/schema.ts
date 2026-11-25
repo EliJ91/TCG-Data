@@ -106,7 +106,7 @@ export const refreshProducts = sqliteTable("refresh_products", {
   runId: text("run_id").notNull(),
   productId: text("product_id").notNull(),
   status: text("status").notNull(),
-});
+}, (t) => [index("sales_failures_owner_run").on(t.owner,t.runId,t.id).where(sql`status = 'error'`)]);
 export const refreshTargets = sqliteTable("refresh_targets", {
   id: text("id").primaryKey(),
   owner: text("owner").notNull(),

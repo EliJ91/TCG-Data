@@ -33,7 +33,7 @@ async function within(promise){
 test("A new request completes when the first request's schema lookup never settles",async()=>{
  let calls=0,started;
  const firstStarted=new Promise(resolve=>{started=resolve;});
- const worker=await loadWorker({prepare(){return {first(){calls++;if(calls===1){started();return new Promise(()=>{});}return Promise.resolve({name:"resource_windows"});}};}});
+ const worker=await loadWorker({prepare(){return {first(){calls++;if(calls===1){started();return new Promise(()=>{});}return Promise.resolve({name:"sales_failures_owner_run"});}};}});
  void worker.fetch(request());
  await firstStarted;
  assert.equal((await within(worker.fetch(request()))).status,200);
@@ -44,7 +44,7 @@ test("A new request completes when the first request's schema lookup never settl
 
 test("A failed initialization is retried by the next request",async()=>{
  let calls=0;
- const worker=await loadWorker({prepare(){return {async first(){if(++calls===1)throw Error("Temporary D1 lookup failure");return {name:"resource_windows"};}};}});
+ const worker=await loadWorker({prepare(){return {async first(){if(++calls===1)throw Error("Temporary D1 lookup failure");return {name:"sales_failures_owner_run"};}};}});
  assert.equal((await worker.fetch(request())).status,503);
  assert.equal((await worker.fetch(request())).status,200);
  assert.equal(calls,2);
@@ -52,8 +52,8 @@ test("A failed initialization is retried by the next request",async()=>{
 
 test("Existing databases add the read indexes without rebuilding inventory", async () => {
  const sql = new DatabaseSync(":memory:");
- const {schema,refreshReadSchema,inventorySyncSchema} = await import(moduleUrl("../cloudflare/generated/schema.ts"));
- for (const statement of schema.filter(statement=>![...refreshReadSchema,...inventorySyncSchema].includes(statement))) sql.exec(statement);
+ const {schema,refreshReadSchema,inventorySyncSchema,salesFailureSchema} = await import(moduleUrl("../cloudflare/generated/schema.ts"));
+ for (const statement of schema.filter(statement=>![...refreshReadSchema,...inventorySyncSchema,...salesFailureSchema].includes(statement))) sql.exec(statement);
  sql.prepare("INSERT INTO workspaces(owner) VALUES (?)").run(owner);
  let upgrades = 0;
  const worker = await loadWorker({
@@ -65,6 +65,7 @@ test("Existing databases add the read indexes without rebuilding inventory", asy
  });
  assert.equal((await worker.fetch(request())).status,200);
  assert(sql.prepare("SELECT name FROM sqlite_master WHERE name='cards_version_product'").get());
+ assert(sql.prepare("SELECT name FROM sqlite_master WHERE name='sales_failures_owner_run'").get());
  assert(sql.prepare("SELECT owner FROM workspaces WHERE owner=?").get(owner));
  assert.equal((await worker.fetch(request())).status,200);
  assert.equal(upgrades,1);

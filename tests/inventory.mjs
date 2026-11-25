@@ -456,3 +456,95 @@ test("Views omit rows with no displayed values before counting, paging, or expor
  const allCsv = await (await data.exportInventory(owner,{})).text();
  assert.equal(csv.parseCSV(allCsv).records.length,31);
 });
+
+test("Sales pull modes quote credits without a product cap and keep failed Product IDs",async()=>{
+ const pullOwner="pull-modes";
+ const csvText=["Lookup,Label",...Array.from({length:155},(_,index)=>(300000+index)+",Card "+index)].join("\n");
+ const prepared=csv.prepareImport(csvText,{productId:"Lookup"});
+ const {id:importId}=await data.startImport(pullOwner,{mode:"replace",filename:"modes.csv",headers:prepared.headers,count:prepared.rows.length});
+ await data.uploadChunk(pullOwner,importId,0,prepared.rows);
+ await data.commitImport(pullOwner,importId);
+ const now=Date.now(), old=now-7*86400000;
+ const marketInsert=sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?)");
+ for(const row of prepared.rows.slice(0,100)){
+  marketInsert.run(pullOwner+"|"+row.info.key,pullOwner,row.info.key,row.info.productId,old,
+    JSON.stringify({analyzed:true,available:true,historyRange:"annual",unitsSold:41}),"{}");
+ }
+ const {salesHistoryPath}=await import(adapterUrl);
+ const history=id=>({product_id:Number(id),range:"annual",series:[{sku:Number(id)+100000,points:[{date:"2026-01-01",quantity_sold:9}]}]});
+ const cached="300100";
+ const path=salesHistoryPath(cached);
+ sql.prepare("INSERT INTO api_cache(id,owner,fetched_at,data) VALUES (?,?,?,?)")
+  .run(pullOwner+"|api-sh:"+path,pullOwner,old,JSON.stringify({body:history(cached),path,fetchedAt:old}));
+ const failed="300101";
+ const apiCalls=[];
+ const realFetch=globalThis.fetch;
+ globalThis.inventoryTestEnv.API_SH_API_KEY="local-test-only-key";
+ globalThis.fetch=async input=>{
+  const url=new URL(String(input));
+  if(url.pathname==="/v1/account") return Response.json({
+   account:{id:pullOwner,status:"active"},credits:{free:500-apiCalls.length,free_resets_at:new Date(now+86400000).toISOString()},
+   spend:{this_month:apiCalls.length,monthly_limit:1000,period:"UTC"},
+  });
+  const productId=url.searchParams.get("id");
+  apiCalls.push(productId);
+  const headers={"x-credits-used":"1","x-request-id":crypto.randomUUID()};
+  if(productId===failed) return Response.json({error:"not found"},{status:404,headers});
+  return Response.json(history(productId),{headers});
+ };
+ try {
+  const missing=await market.prepareRefreshPlan(pullOwner,{mode:"missing",maxProducts:1});
+  const all=await market.prepareRefreshPlan(pullOwner,{mode:"all",maxProducts:1});
+  assert.equal(missing.groups,55);
+  assert.equal(missing.maximumCredits,54);
+  assert.equal(all.groups,155);
+  assert.equal(all.maximumCredits,155);
+  assert.deepEqual(apiCalls,[],"Estimates use no sales API credits");
+  await assert.rejects(()=>market.startRefresh(pullOwner,{planId:missing.planId,approvedCost:53}),{status:409});
+  const started=await market.startRefresh(pullOwner,{planId:missing.planId,approvedCost:54});
+  let progress;
+  for (const key of started.keys) {
+   progress=await market.refreshStep(pullOwner,started.id,key);
+   if(progress.error){
+    assert.equal(progress.productId,failed);
+    assert.match(progress.error,/HTTP 404/);
+   }
+  }
+  assert.equal(progress.status,"complete");
+  assert.equal(progress.completed,55);
+  assert.equal(progress.failed,1);
+  assert.equal(apiCalls.length,54);
+  assert(apiCalls.every(id=>Number(id)>=300101));
+  assert.equal((await market.refreshPlan(pullOwner,{mode:"missing"})).groups,1);
+  const saved=sql.prepare("SELECT data FROM market WHERE owner=? AND product_id=?").get(pullOwner,"300000");
+  assert.equal(JSON.parse(saved.data).unitsSold,41,"Missing mode preserves previously analyzed products");
+  const failure=await market.failedProducts(pullOwner,null);
+  assert.deepEqual(failure.failures.map(row=>row.productId),[failed]);
+  assert.deepEqual((await market.failedProducts("another-owner",null)).failures,[]);
+  const quotedAll=await market.prepareRefreshPlan(pullOwner,{mode:"all",selected:[prepared.rows[100].info.key]});
+  assert.equal(quotedAll.maximumCredits,1,"All mode quotes a fresh request even for cached history");
+  const refresh=await market.startRefresh(pullOwner,{planId:quotedAll.planId,approvedCost:1});
+  const result=await market.refreshStep(pullOwner,refresh.id,refresh.keys[0]);
+  assert.equal(result.status,"complete");
+  assert.equal(apiCalls.at(-1),cached);
+  assert.equal((await market.failedProducts(pullOwner,null)).failures[0].productId,failed);
+ } finally {
+  globalThis.fetch=realFetch;
+  delete globalThis.inventoryTestEnv.API_SH_API_KEY;
+ }
+});
+
+test("Failed Product IDs remain accessible past the first page",async()=>{
+ const owner="failure-history";
+ const runId=crypto.randomUUID();
+ sql.prepare("INSERT INTO refresh_runs(id,owner,status,started_at,failed,total,detail) VALUES (?,?,?,?,?,?,?)")
+  .run(runId,owner,"complete",1700000000000,51,51,"{}");
+ const insert=sql.prepare("INSERT INTO refresh_products(id,owner,run_id,product_id,status) VALUES (?,?,?,?,?)");
+ for(let value=800000;value<800051;value++) insert.run(runId+":"+value,owner,runId,String(value),"error");
+ const first=await market.failedProducts(owner,null);
+ assert.equal(first.failures.length,50);
+ assert(first.next);
+ const older=await market.failedProducts(owner,first.next);
+ assert.deepEqual(older.failures.map(row=>row.productId),["800000"]);
+ assert.equal(older.next,null);
+});

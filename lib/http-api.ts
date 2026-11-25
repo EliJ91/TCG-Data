@@ -18,6 +18,7 @@ import {
   startRefresh,
   refreshStep,
   cancelRefresh,
+  failedProducts,
   recoverResult,
   linkProduct,
 } from "./market";
@@ -62,6 +63,7 @@ export async function handleApi(request:Request,owner:string,path:string,allowed
       if (path === "sync/meta") return Response.json(await syncMetadata(owner,url.searchParams.get("version")));
       if (path === "sync/inventory") return Response.json(await syncInventory(owner,url.searchParams));
       if (path === "sync/changes") return Response.json(await syncChanges(owner,url.searchParams));
+      if (path === "market/failures") return Response.json(await failedProducts(owner,url.searchParams.get("before")));
       if (path === "account") return Response.json(await syncAccount(owner),{headers:{"Cache-Control":"no-store"}});
       if (path === "account/details") {
         await limitOperation(owner,"account-details",6,60_000);

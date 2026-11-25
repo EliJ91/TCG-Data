@@ -1,0 +1,1 @@
+CREATE INDEX `sales_failures_owner_run` ON `refresh_products` (`owner`,`run_id`,`id`) WHERE status = 'error';

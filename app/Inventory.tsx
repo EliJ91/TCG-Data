@@ -76,6 +76,9 @@ type Result = {
   units: number;
   lastRefreshed: number | null;
 };
+type PullMode = "missing" | "all";
+type FailedProduct = {id:string; productId:string; startedAt:number};
+type FailurePage = {failures:FailedProduct[]; next:string|null};
 const initialResult: Result = {
   rows: [],
   page: 1,
@@ -307,7 +310,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const [advanced, setAdvanced] = useState(false),
     [view, setView] = useState("all"),
     [modal, setModal] = useState<
-      "settings" | "columns" | "refresh" | "export" | "preset" | "account" | null
+      "settings" | "columns" | "refresh" | "export" | "preset" | "account" | "failures" | null
     >(null);
   const [settings, setSettings] = useState<Preferences>(defaults),
     [saving, setSaving] = useState(false);
@@ -337,11 +340,14 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     [importId, setImportId] = useState<string | null>(null),
     [replaceConfirmed, setReplaceConfirmed] = useState(false);
   const [scope, setScope] = useState("all"),
+    [pullMode, setPullMode] = useState<PullMode>("missing"),
     [plan, setPlan] = useState<RecordValue | null>(null),
     [planBusy, setPlanBusy] = useState(false);
   const [refresh, setRefresh] = useState<RecordValue | null>(null),
     [refreshRunning, setRefreshRunning] = useState(false),
-    [refreshErrors, setRefreshErrors] = useState<string[]>([]);
+    [refreshErrors, setRefreshErrors] = useState<{productId:string;message:string}[]>([]);
+  const [failurePage, setFailurePage] = useState<FailurePage|null>(null);
+  const [failuresBusy, setFailuresBusy] = useState(false);
   const [exportScope, setExportScope] = useState("filtered"),
     [exportAnalysis, setExportAnalysis] = useState(false);
   const fileInput = useRef<HTMLInputElement>(null),
@@ -409,7 +415,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     ...(choice === "selected" ? { selected: [...selected] } : {}),
     ...(choice !== "all" ? {displayColumns} : {}),
   });
-  const refreshOptions={prioritizeUnanalyzed:settings.prioritizeUnanalyzed,maxProducts:settings.maxProducts};
   const showError = (problem: unknown) =>
     setError(problem instanceof Error ? problem.message : String(problem));
   const changeFilters = (next: Filters) => {
@@ -722,27 +727,17 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   };
   useEffect(() => {
     if (modal !== "refresh") return;
-    let active = true;
+    const controller = new AbortController();
+    setPlan(null);
     setPlanBusy(true);
-    void api("market/plan", { ...scopeQuery(scope), onlyStale: true, ...refreshOptions })
-      .then((value) => {
-        if (active) setPlan(value);
-      })
-      .catch(showError)
-      .finally(() => {
-        if (active) setPlanBusy(false);
-      });
-    return () => {
-      active = false;
-    };
-  }, [
-    modal,
-    scope,
-    selected,
-    settings.maxProducts,
-    settings.prioritizeUnanalyzed,
-  ]);
+    void api("market/plan", {...scopeQuery(scope),mode:pullMode},controller.signal)
+      .then(value=>{if(!controller.signal.aborted)setPlan(value);})
+      .catch(problem=>{if(!controller.signal.aborted)showError(problem);})
+      .finally(()=>{if(!controller.signal.aborted)setPlanBusy(false);});
+    return ()=>controller.abort();
+  }, [modal,scope,selected,pullMode,displayColumns]);
   const runRefresh = async () => {
+    if (!plan?.planId || plan.options?.mode !== pullMode) return;
     setError("");
     setRefreshErrors([]);
     setRefreshRunning(true);
@@ -751,10 +746,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     try {
       const started = await api("market/start", {
         ...scopeQuery(scope),
-        onlyStale: true,
-        ...refreshOptions,
-        approvedCost: plan?.maximumCredits,
-        planId: plan?.planId,
+        mode: pullMode,
+        approvedCost: plan.maximumCredits,
+        planId: plan.planId,
       });
       setRefresh({
         ...started,
@@ -773,7 +767,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         const progress = await api("market/step", { id: started.id, key });
         setRefresh(progress);
         if (progress.error)
-          setRefreshErrors((current) => [...current, progress.error].slice(-5));
+          setRefreshErrors((current) => [...current, {productId:progress.productId,message:progress.error}].slice(-5));
         if (progress.status !== "running") break;
       }
       await loadMetadata();
@@ -803,6 +797,30 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setAccountBusy(true);
     void api("account/details").then(report=>{setAccountReport(report);setMeta(current=>current?{...current,usage:report.snapshot}:current);}).catch(showError).finally(()=>setAccountBusy(false));
   },[modal]);
+  useEffect(()=>{
+    if (modal!=="failures") return;
+    const controller=new AbortController();
+    setFailurePage(null);
+    setFailuresBusy(true);
+    void api<FailurePage>("market/failures",undefined,controller.signal)
+      .then(page=>{if(!controller.signal.aborted)setFailurePage(page);})
+      .catch(problem=>{if(!controller.signal.aborted)showError(problem);})
+      .finally(()=>{if(!controller.signal.aborted)setFailuresBusy(false);});
+    return ()=>controller.abort();
+  },[modal]);
+
+  const loadMoreFailures = async () => {
+    if (!failurePage?.next) return;
+    setFailuresBusy(true);
+    try {
+      const next=await api<FailurePage>("market/failures?before="+encodeURIComponent(failurePage.next));
+      setFailurePage(current=>current ? {...next,failures:[...current.failures,...next.failures]} : current);
+    } catch (problem) {
+      showError(problem);
+    } finally {
+      setFailuresBusy(false);
+    }
+  };
   const exportFile = async () => {
     setSaving(true);
     setError("");
@@ -945,6 +963,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 onClick={() => {
                   setPlan(null);
                   setScope("all");
+                  setPullMode("missing");
                   setModal("refresh");
                 }}
               >
@@ -954,11 +973,15 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             </div>
           )}
         </div>
-        {hasInventory && <p className="coverage-line">
+        <p className="coverage-line">
+          {hasInventory && <>
           <button className="text-button" onClick={()=>changeFilters({...filters,freshness:"analyzed"})}>{Number(meta?.analyzedProducts??0).toLocaleString()} products analyzed</button>
           <span>·</span><button className="text-button" onClick={()=>changeFilters({...filters,freshness:"unanalyzed"})}>{Number(meta?.unanalyzedProducts??0).toLocaleString()} known products unanalyzed</button>
           {!!meta?.unresolvedProducts && <span>· {meta.unresolvedProducts.toLocaleString()} SKU groups need Product IDs</span>}
-        </p>}
+          <span>·</span>
+          </>}
+          <button className="text-button" onClick={()=>{setError("");setModal("failures");}}>Failed Product IDs</button>
+        </p>
         {error && (
           <div className="banner error" role="alert">
             <AlertCircle size={18} />
@@ -1075,9 +1098,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             {refreshErrors.length > 0 && (
               <details>
                 <summary>Request issues</summary>
-                {refreshErrors.map((message, index) => (
+                {refreshErrors.map(({productId,message}, index) => (
                   <p className="small" key={index}>
-                    {message}
+                    Product ID {productId} · {message}
                   </p>
                 ))}
               </details>
@@ -1267,6 +1290,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 className="text-button"
                 onClick={() => {
                   setScope("selected");
+                  setPullMode("missing");
                   setModal("refresh");
                 }}
               >
@@ -1657,10 +1681,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             <section>
               <h3>Refresh preferences</h3>
               <div className="settings-grid">
-                <label>Maximum products per refresh<input type="number" min="1" max="1000" value={settings.maxProducts} onChange={e=>setSettings({...settings,maxProducts:Number(e.target.value)})}/></label>
                 <label>Outdated after (hours)<input type="number" min="1" value={settings.staleHours} onChange={e=>setSettings({...settings,staleHours:Number(e.target.value)})}/></label>
               </div>
-              <label className="check-label"><input type="checkbox" checked={settings.prioritizeUnanalyzed} onChange={e=>setSettings({...settings,prioritizeUnanalyzed:e.target.checked})}/>Analyze new products first</label>
               <p className="small muted">Every pull shows the required API credits first. Results are kept across monthly resets so you can continue analyzing a large inventory over time.</p>
             </section>
             <details className="data-notes"><summary>Data coverage</summary>
@@ -1803,6 +1825,24 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           </div>
         </Modal>
       )}
+      {modal === "failures" && (
+        <Modal error={error} title="Failed Product IDs" onClose={()=>setModal(null)}>
+          <div className="modal-body">
+            {failuresBusy && !failurePage && <p className="muted">Loading pull history...</p>}
+            {failurePage && !failurePage.failures.length && <p className="muted">No failed sales-history lookups recorded.</p>}
+            {failurePage?.failures.map(failure=>(
+              <div className="request-row" key={failure.id}>
+                <a href={"https://www.tcgplayer.com/product/"+encodeURIComponent(failure.productId)} target="_blank" rel="noreferrer">
+                  Product ID {failure.productId}
+                </a>
+                <span className="small muted">{dateLabel(failure.startedAt)}</span>
+              </div>
+            ))}
+            {failurePage?.next && <button className="button" disabled={failuresBusy} onClick={()=>void loadMoreFailures()}>Load older failures</button>}
+          </div>
+          <div className="modal-footer"><button className="button" onClick={()=>setModal(null)}>Close</button></div>
+        </Modal>
+      )}
       {modal === "refresh" && (
         <Modal
           error={error}
@@ -1811,9 +1851,14 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         >
           <div className="modal-body">
             <p className="muted">
-              Pull all sales-quantity history available from the provider (up to one year of weekly totals) for {scope === "selected" ? selected.size.toLocaleString() + " selected rows" : "your inventory"}.
-              Filter the saved results however you like afterward.
+              Pull up to one year of weekly sales history for {scope === "selected" ? selected.size.toLocaleString()+" selected rows" : "your inventory"}.
             </p>
+            <fieldset className="scope-options" aria-label="Sales history to pull">
+              <label><input type="radio" name="pull-mode" checked={pullMode==="missing"}
+                onChange={()=>{setPlan(null);setError("");setPullMode("missing");}}/> Only missing product data</label>
+              <label><input type="radio" name="pull-mode" checked={pullMode==="all"}
+                onChange={()=>{setPlan(null);setError("");setPullMode("all");}}/> Pull new data for all products</label>
+            </fieldset>
             <div className="estimate">
               {planBusy ? (
                 <p>
@@ -1822,14 +1867,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 </p>
               ) : plan ? (
                 <>
-                  <span className="eyebrow">API CREDITS REQUIRED</span>
-                  <strong>
-                    {plan.minimumCredits === plan.maximumCredits
-                      ? plan.maximumCredits.toLocaleString()
-                      : plan.minimumCredits.toLocaleString() +
-                        "–" +
-                        plan.maximumCredits.toLocaleString()}{" "}
-                    credits
+                  <strong role="status">
+                    {plan.maximumCredits ? "This pull may use up to "+plan.maximumCredits.toLocaleString()+" API.SH credits." : "This pull uses 0 API.SH credits."}
                   </strong>
                   <p>
                     {plan.groups.toLocaleString()} unique Product IDs to update
@@ -1865,7 +1904,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             ) : (
               <button
                 className="button primary"
-                disabled={planBusy || !plan?.groups || activeRefresh}
+                disabled={planBusy || !plan?.groups || !plan?.planId || plan.options?.mode!==pullMode || activeRefresh}
                 onClick={() => void runRefresh()}
               >
                 <RefreshCw size={16} />
