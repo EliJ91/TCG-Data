@@ -944,7 +944,7 @@ tbody tr:last-child td {
 }
 .column-option {
   display: grid;
-  grid-template-columns: 15px minmax(0, 1fr) auto;
+  grid-template-columns: 28px minmax(0, 1fr);
   align-items: center;
   gap: 9px;
   border-bottom: 1px solid #edf1ed;
@@ -965,13 +965,24 @@ tbody tr:last-child td {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.column-option > div {
-  display: flex;
-  gap: 10px;
+.column-grip {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 32px;
+  padding: 0;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: grab;
+  touch-action: none;
 }
-.column-option .text-button {
-  font-size: 14px;
-  white-space: nowrap;
+.column-grip:active { cursor: grabbing; }
+.column-option.dragging { opacity: .5; }
+.column-option.drop-target {
+  outline: 2px solid var(--green);
+  outline-offset: -2px;
 }
 .file-summary {
   display: flex;
@@ -1446,15 +1457,6 @@ tbody tr:last-child td {
   .original-values > div {
     grid-template-columns: 120px 1fr;
     gap: 10px;
-  }
-  .column-option {
-    grid-template-columns: 15px minmax(0, 1fr);
-    row-gap: 4px;
-  }
-  .column-option > div {
-    grid-column: 2;
-    justify-content: flex-end;
-    gap: 16px;
   }
 }
 @media (prefers-reduced-motion: reduce) {

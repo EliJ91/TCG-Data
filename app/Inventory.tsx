@@ -262,7 +262,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     [saving, setSaving] = useState(false);
   const [accountReport,setAccountReport]=useState<RecordValue|null>(null), [accountBusy,setAccountBusy]=useState(false), [productDraft,setProductDraft]=useState("");
   const [saveName, setSaveName] = useState(""),
-    [dragColumn, setDragColumn] = useState<string | null>(null);
+    [dragColumn, setDragColumn] = useState<string | null>(null),
+    [dropColumn, setDropColumn] = useState<string | null>(null);
+  const touchDrag = useRef<string | null>(null);
   const [card, setCard] = useState<RecordValue | null>(null),
     [cardLoading, setCardLoading] = useState(false),
     [historyType, setHistoryType] = useState("market");
@@ -696,16 +698,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       setCardLoading(false);
     }
   };
-  const moveColumn = (key: string, offset: number) => {
-    const shown = visible.map(column => column.key);
-    const shownIndex = shown.indexOf(key), shownTarget = shownIndex + offset;
-    if (shownTarget < 0 || shownTarget >= shown.length) return;
+  const swapColumns = (from: string, to: string) => {
+    if (from === to || !visible.some(column => column.key === from) || !visible.some(column => column.key === to)) return;
     const list = [...settings.visibleColumns],
-      index = list.indexOf(key),
-      target = list.indexOf(shown[shownTarget]);
+      index = list.indexOf(from),
+      target = list.indexOf(to);
     [list[index], list[target]] = [list[target], list[index]];
     changeColumns(list);
   };
+  const finishColumnDrag = () => {touchDrag.current = null;setDragColumn(null);setDropColumn(null);};
+  const columnAt = (x: number, y: number) => document.elementFromPoint(x,y)?.closest<HTMLElement>("[data-column-key]")?.dataset.columnKey;
   const activeRefresh = refreshRunning || refresh?.status === "running";
   const progress = refresh?.total
     ? Math.min(
@@ -1735,7 +1737,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         >
           <div className="modal-body">
             <p className="muted small">
-              Choose visible columns. Use Move left or Move right to reorder the table. Your choices save automatically for your next visit and CSV upload.
+              Drag the grip to swap columns. The top column appears farthest left in the table. Your choices save automatically for your next visit and CSV upload.
             </p>
             <div className="column-list">
               {[
@@ -1749,23 +1751,42 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 return (
                   <div
                     key={key}
-                    className={
-                      shown ? "column-option visible" : "column-option"
-                    }
-                    draggable={shown}
-                    onDragStart={() => setDragColumn(key)}
-                    onDragOver={(event) => event.preventDefault()}
-                    onDrop={() => {
-                      if (!dragColumn || dragColumn === key || !shown) return;
-                      const list = settings.visibleColumns.filter(
-                        (item) => item !== dragColumn,
-                      );
-                      list.splice(list.indexOf(key), 0, dragColumn);
-                      changeColumns(list);
-                      setDragColumn(null);
-                    }}
+                    data-column-key={key}
+                    className={"column-option" + (shown ? " visible" : "") + (dragColumn === key ? " dragging" : "") + (dropColumn === key && dragColumn !== key ? " drop-target" : "")}
                   >
-                    <GripVertical size={15} />
+                    <button
+                      className="column-grip"
+                      aria-label={"Drag to reorder " + column.label}
+                      title="Drag to swap columns. Keyboard: use the up and down arrow keys."
+                      disabled={!shown}
+                      onPointerDown={event => {
+                        if (!shown) return;
+                        event.preventDefault();
+                        event.currentTarget.setPointerCapture(event.pointerId);
+                        touchDrag.current = key;setDragColumn(key);setDropColumn(key);
+                      }}
+                      onPointerMove={event => {
+                        if (!touchDrag.current) return;
+                        const target = columnAt(event.clientX, event.clientY);
+                        setDropColumn(target && visible.some(column => column.key === target) ? target : null);
+                        const list = event.currentTarget.closest(".column-list"), bounds = list?.getBoundingClientRect();
+                        if (bounds) list?.scrollBy(0, event.clientY < bounds.top + 32 ? -12 : event.clientY > bounds.bottom - 32 ? 12 : 0);
+                      }}
+                      onPointerUp={event => {
+                        if (!touchDrag.current) return;
+                        const target = columnAt(event.clientX, event.clientY);
+                        if (target) swapColumns(touchDrag.current, target);
+                        finishColumnDrag();
+                        if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+                      }}
+                      onPointerCancel={finishColumnDrag}
+                      onKeyDown={event => {
+                        if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
+                        event.preventDefault();
+                        const index = visible.findIndex(column => column.key === key), target = visible[index + (event.key === "ArrowUp" ? -1 : 1)];
+                        if (target) swapColumns(key, target.key);
+                      }}
+                    ><GripVertical size={17} /></button>
                     <label>
                       <input
                         type="checkbox"
@@ -1781,28 +1802,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                       />
                       <span>{column.label}</span>
                     </label>
-                    {shown && (
-                      <div>
-                        <button
-                          className="text-button"
-                          disabled={visible[0]?.key === key}
-                          title="Move this column one position to the left in the table"
-                          onClick={() => moveColumn(key, -1)}
-                        >
-                          Move left
-                        </button>
-                        <button
-                          className="text-button"
-                          disabled={
-                            visible[visible.length - 1]?.key === key
-                          }
-                          title="Move this column one position to the right in the table"
-                          onClick={() => moveColumn(key, 1)}
-                        >
-                          Move right
-                        </button>
-                      </div>
-                    )}
                   </div>
                 );
               })}
