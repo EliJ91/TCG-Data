@@ -1,6 +1,9 @@
 import { env } from "cloudflare:workers";
 import {
   columns,
+  inventoryColumns,
+  inventoryPreferences,
+  csvColumnKey,
   normalizePreferences,
   type Preferences,
   type Filters,
@@ -43,7 +46,7 @@ export async function workspace(owner: string) {
     .first<Workspace>())!;
 }
 export const preferences = (space: Workspace) =>
-  normalizePreferences(JSON.parse(space.settings));
+  inventoryPreferences(normalizePreferences(JSON.parse(space.settings)), JSON.parse(space.headers));
 export async function protectSecret(value: string) {
   const secret = env.CREDENTIAL_ENCRYPTION_KEY;
   if (!secret)
@@ -232,7 +235,6 @@ export async function uploadChunk(
   for (const row of rows)
     if (
       !row.info?.key ||
-      !row.info.name ||
       (!/^\d+$/.test(row.info.skuId) && !/^\d+$/.test(row.info.productId)) ||
       !Number.isSafeInteger(row.info.quantity) ||
       row.info.quantity < 0 ||
@@ -298,6 +300,7 @@ export async function commitImport(owner: string, id: string) {
         ]
       : JSON.parse(session.headers);
   const statements: D1PreparedStatement[] = [];
+  const settings = inventoryPreferences(preferences(space), headers);
   if (session.mode === "update" && space.active_version)
     statements.push(
       database()
@@ -314,12 +317,13 @@ export async function commitImport(owner: string, id: string) {
       .bind(id, owner, id),
     database()
       .prepare(
-        "UPDATE workspaces SET active_version=?,filename=?,headers=?,imported_at=COALESCE(imported_at,?),updated_at=?,import_lock=NULL WHERE owner=? AND import_lock=?",
+        "UPDATE workspaces SET active_version=?,filename=?,headers=?,settings=?,imported_at=COALESCE(imported_at,?),updated_at=?,import_lock=NULL WHERE owner=? AND import_lock=?",
       )
       .bind(
         id,
         session.filename,
         JSON.stringify(headers),
+        JSON.stringify(settings),
         Date.now(),
         Date.now(),
         owner,
@@ -457,6 +461,11 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
   const p = preferences(space),
     e = expressions(p),
     f = input.filters;
+  const headers: string[] = JSON.parse(space.headers);
+  const quote = (value: string) => '"' + value.replaceAll('"', '""') + '"';
+  for (const header of headers)
+    e[csvColumnKey(header)] = "(SELECT value FROM json_each(r.raw) WHERE key='" + header.replaceAll("'", "''") + "')";
+  e.rowNo = "r.row_no";
   const values: unknown[] = [owner, space.active_version ?? ""],
     where = ["c.owner=?", "c.version=?"];
   if (f?.search?.trim()) {
@@ -465,10 +474,10 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
       "(" +
         ["name", "number", "set", "productId", "skuId"]
           .map((key) => e[key] + " LIKE ? ESCAPE '\\'")
-          .join(" OR ") +
+          .join(" OR ") + " OR EXISTS (SELECT 1 FROM json_each(r.raw) WHERE CAST(value AS TEXT) LIKE ? ESCAPE '\\')" +
         ")",
     );
-    values.push(search, search, search, search, search);
+    values.push(search, search, search, search, search, search);
   }
   for (const [key, list] of Object.entries(f?.categories ?? {}))
     if (
@@ -525,20 +534,22 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
     where.push("c.card_key IN (SELECT value FROM json_each(?))");
     values.push(JSON.stringify(input.selected));
   }
-  const sort = e[input.sort ?? "priority"]
-      ? (input.sort ?? "priority")
-      : "name",
+  const sort = e[input.sort ?? "rowNo"]
+      ? (input.sort ?? "rowNo")
+      : "rowNo",
     direction = input.direction === "asc" ? "ASC" : "DESC";
-  const select = columns
-    .map((column) => e[column.key] + ' AS "' + column.key + '"')
+  const select = [...columns, ...inventoryColumns(headers).filter(column => column.key.startsWith("csv:"))]
+    .map((column) => e[column.key] + ' AS ' + quote(column.key))
     .join(",");
   const order =
-    '"' + sort + '" IS NULL,"' + sort + '" ' + direction + ",c.card_key ASC";
+    e[sort] + " IS NULL," + e[sort] + ' ' + direction + ",c.card_key ASC";
   const limit = f?.limit === 50 || f?.limit === 100 ? f.limit : 0;
   const sql =
     "SELECT c.card_key AS key," +
     select +
-    ",json_extract(m.data,'$.scope') AS scope,json_extract(m.data,'$.lowerBound') AS lowerBound,COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0) AS analyzed,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE " +
+    // Pin the card lookup index: SQLite otherwise favors row order and scans
+    // the entire inventory once per card on large imports.
+    ",r.row_no AS rowNo,json_extract(m.data,'$.lowerBound') AS lowerBound,COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0) AS analyzed,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN inventory_rows r ON r.id=(SELECT id FROM inventory_rows INDEXED BY rows_card WHERE owner=c.owner AND version=c.version AND card_key=c.card_key ORDER BY row_no LIMIT 1) WHERE " +
     where.join(" AND ") +
     " ORDER BY " +
     order +
@@ -591,8 +602,9 @@ export async function exportInventory(
 ) {
   const space = await workspace(owner),
     query = buildQuery(owner, space, input),
+    exportColumns = inventoryColumns(JSON.parse(space.headers)),
     headers = input.analysis
-      ? columns.map((column) => column.label)
+      ? exportColumns.map((column) => column.label)
       : JSON.parse(space.headers);
   const encoder = new TextEncoder(),
     db = database();
@@ -621,7 +633,7 @@ export async function exportInventory(
             rows.results
               .map((row) => {
                 if (input.analysis)
-                  return columns
+                  return exportColumns
                     .map((column) => csvCell(row[column.key]))
                     .join(",");
                 const original = JSON.parse(String(row.raw));

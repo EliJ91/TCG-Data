@@ -1,21 +1,8 @@
 import { normalizeLabel, type ImportRow } from "./domain";
-export const importFields = [
-  ["skuId", "TCGplayer Id (SKU)"],
-  ["productId", "Product ID"],
-  ["name", "Card name"],
-  ["quantity", "Quantity"],
-  ["number", "Card number"],
-  ["set", "Set"],
-  ["rarity", "Rarity"],
-  ["condition", "Condition"],
-  ["printing", "Printing"],
-  ["language", "Language"],
-  ["originalPrice", "Your listing price"],
-] as const;
-export type Mapping = Record<string, string>;
+export type Mapping = { productId: string };
 const aliases: Record<string, string[]> = {
   skuId: ["tcgplayerid", "skuid", "marketplaceskuid"],
-  productId: ["productid", "tcgplayerproductid"],
+  productId: ["productid", "tcgplayerproductid", "producturl", "tcgplayerurl"],
   name: ["productname", "cardname", "name"],
   quantity: ["totalquantity", "quantity", "qty", "inventoryquantity", "stock"],
   number: ["number", "cardnumber", "collectornumber"],
@@ -95,23 +82,31 @@ export function parseCSV(text: string) {
   return { headers, records };
 }
 export function mapColumns(headers: string[]): Mapping {
-  return Object.fromEntries(
-    Object.entries(aliases).map(([key, names]) => [
-      key,
-      headers.find((header) => names.includes(normalizeLabel(header))) ?? "",
-    ]),
-  );
+  return { productId: headers.find(header => aliases.productId.includes(normalizeLabel(header))) ?? "" };
+}
+export function productIdFrom(value: string) {
+  const text = value.trim();
+  if (/^\d+$/.test(text)) return text;
+  try {
+    const url = new URL(text);
+    if (["tcgplayer.com", "www.tcgplayer.com"].includes(url.hostname) && ["http:", "https:"].includes(url.protocol))
+      return url.pathname.match(/^\/product\/(\d+)(?:\/|$)/)?.[1] ?? "";
+  } catch {}
+  return "";
 }
 export function prepareImport(
   text: string,
   mapping?: Mapping,
 ): { headers: string[]; rows: ImportRow[] } {
-  const { headers, records } = parseCSV(text),
-    fields = mapping ?? mapColumns(headers);
-  if (!fields.name || !fields.quantity || (!fields.skuId && !fields.productId))
-    throw new Error(
-      "Map Card name, Quantity, and either TCGplayer Id or Product ID.",
-    );
+  const { headers, records } = parseCSV(text);
+  const selected = mapping ?? mapColumns(headers);
+  if (!selected.productId || !headers.includes(selected.productId))
+    throw new Error("Choose the column containing TCGplayer Product IDs.");
+  // Other columns are optional and remain untouched in raw. Recognized names
+  // only provide a useful row title and inventory totals, never import rules.
+  const fields = Object.fromEntries(Object.entries(aliases).map(([key, names]) =>
+    [key, headers.find(header => names.includes(normalizeLabel(header))) ?? ""]));
+  fields.productId = selected.productId;
   const indices = Object.fromEntries(
     Object.entries(fields).map(([key, header]) => [
       key,
@@ -119,43 +114,21 @@ export function prepareImport(
     ]),
   );
   const problems: string[] = [];
+  const occurrences = new Map<string, number>();
   const rows = records.map((record, index) => {
     const get = (key: string) =>
       indices[key] >= 0 ? record[indices[key]].trim() : "";
-    const skuId = get("skuId"),
-      productId = get("productId"),
-      name = get("name"),
+    const skuId = "",
+      productId = productIdFrom(get("productId")),
+      name = get("name") || "Product " + productId,
       rawQuantity = get("quantity").replace(/,/g, ""),
-      quantity = Number(rawQuantity);
-    if (!name) problems.push("Row " + (index + 2) + ": card name is empty.");
-    if (skuId && !/^\d+$/.test(skuId))
-      problems.push(
-        "Row " +
-          (index + 2) +
-          ": TCGplayer Id must be a numeric marketplace SKU.",
-      );
-    if (productId && !/^\d+$/.test(productId))
-      problems.push("Row " + (index + 2) + ": Product ID must be numeric.");
-    if (!/^\d+$/.test(skuId) && !/^\d+$/.test(productId))
-      problems.push(
-        "Row " +
-          (index + 2) +
-          ": a numeric marketplace SKU or product ID is required.",
-      );
-    if (!rawQuantity || !Number.isSafeInteger(quantity) || quantity < 0)
-      problems.push(
-        "Row " +
-          (index + 2) +
-          ": quantity must be a non-negative whole number.",
-      );
-    const condition = get("condition"),
-      printing = get("printing"),
-      language = get("language");
-    const key = skuId
-      ? "sku:" + skuId
-      : ["product:" + productId, condition, printing, language]
-          .map(normalizeLabel)
-          .join("|");
+      quantity = rawQuantity && Number.isSafeInteger(Number(rawQuantity)) && Number(rawQuantity) >= 0 ? Number(rawQuantity) : 0;
+    if (!productId) problems.push("Row " + (index + 2) + ": enter a numeric Product ID or a TCGplayer product link in the selected column.");
+    const condition = "", printing = "", language = "";
+    const occurrence = occurrences.get(productId) ?? 0;
+    occurrences.set(productId, occurrence + 1);
+    // Keep every CSV row, including repeated products, with stable occurrence IDs.
+    const key = "product:" + productId + "|row:" + occurrence;
     const price = Number(get("originalPrice").replace(/[$,]/g, ""));
     return {
       info: {

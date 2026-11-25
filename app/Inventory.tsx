@@ -22,7 +22,8 @@ import {
   ExternalLink,
 } from "lucide-react";
 import {
-  columns,
+  inventoryColumns,
+  csvColumnKey,
   defaults,
   emptyFilters,
   formatValue,
@@ -30,12 +31,13 @@ import {
   type Filters,
   type ImportRow,
 } from "../lib/domain";
-import { importFields, type Mapping } from "../lib/csv";
+import { type Mapping } from "../lib/csv";
 import ImportWorker from "../lib/import.worker?worker";
 
 const HistoryChart = lazy(() => import("./HistoryChart"));
 type RecordValue = Record<string, any>;
 type Metadata = {
+  headers: string[];
   filename: string | null;
   importedAt: number | null;
   updatedAt: number | null;
@@ -242,8 +244,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const [meta, setMeta] = useState<Metadata | null>(null),
     [result, setResult] = useState<Result>(initialResult);
   const [filters, setFilters] = useState<Filters>(emptyFilters),
-    [sort, setSort] = useState("priority"),
-    [direction, setDirection] = useState("desc");
+    [sort, setSort] = useState("rowNo"),
+    [direction, setDirection] = useState("asc");
   const [page, setPage] = useState(1),
     [pageSize, setPageSize] = useState(50),
     [loading, setLoading] = useState(true),
@@ -294,8 +296,10 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
     [search, setSearch] = useState("");
   const latest = useRef({ filters, sort, direction, meta });
+  const columnSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
   latest.current = { filters, sort, direction, meta };
   const hasInventory = !!meta?.filename;
+  const columns = inventoryColumns(meta?.headers ?? []);
   const hasFilters =
     !!filters.search ||
     filters.numeric.length > 0 ||
@@ -344,8 +348,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           if (saved) {
             setFilters({ ...emptyFilters, ...saved.filters });
             setSearch(saved.filters?.search ?? "");
-            setSort(saved.sort ?? "priority");
-            setDirection(saved.direction ?? "desc");
+            setSort(saved.sort ?? "rowNo");
+            setDirection(saved.direction ?? "asc");
           }
         } catch {}
       })
@@ -400,6 +404,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setSettings(data.settings);
     return data;
   };
+  const changeColumns = (visibleColumns: string[]) => {
+    const next = {...settings, visibleColumns, columnSelectionVersion: 1};
+    setSettings(next);
+    // Serialize saves so rapid clicks cannot let an older selection win.
+    const job = columnSaveQueue.current.catch(() => {}).then(() => api<Metadata>("preferences", {
+      settings: {visibleColumns, columnSelectionVersion: 1, knownCsvColumns: next.knownCsvColumns},
+    })).then(data => setMeta(current => current ? {...current, settings: data.settings} : current));
+    columnSaveQueue.current = job;
+    void job.catch(showError);
+  };
   const chooseView = (value: string) => {
     setView(value);
     setPage(1);
@@ -416,8 +430,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       return;
     }
     const next: Filters = structuredClone(emptyFilters);
-    let field = "priority",
-      dir = "desc";
+    let field = value === "all" ? "rowNo" : "priority",
+      dir = value === "all" ? "asc" : "desc";
     if (value === "top50") next.limit = 50;
     if (value === "top100") next.limit = 100;
     if (value === "top50" || value === "top100")
@@ -462,6 +476,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     try {
       const text = await input.text(),
         analysis = await runImportWorker(text, "analyze");
+      const savedIdColumn = localStorage.getItem("sortswift-product-id-column");
+      if (savedIdColumn && analysis.headers.includes(savedIdColumn)) analysis.mapping.productId = savedIdColumn;
       setFile({ name: input.name, text, mode, ...analysis });
     } catch (problem) {
       showError(problem);
@@ -484,6 +500,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     try {
       const prepared: { headers: string[]; rows: ImportRow[] } =
         await runImportWorker(file.text, "prepare", file.mapping);
+      localStorage.setItem("sortswift-product-id-column", file.mapping.productId);
       const started = await api<{ id: string }>(
         "imports/start",
         {
@@ -524,6 +541,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       setSelected(new Set());
       setFilters(emptyFilters);
       setSearch("");
+      setSort("rowNo");
+      setDirection("asc");
       setPage(1);
       setNotice(
         "Inventory saved. Market data will refresh only when you request it.",
@@ -683,7 +702,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       target = index + offset;
     if (target < 0 || target >= list.length) return;
     [list[index], list[target]] = [list[target], list[index]];
-    setSettings({ ...settings, visibleColumns: list });
+    changeColumns(list);
   };
   const activeRefresh = refreshRunning || refresh?.status === "running";
   const progress = refresh?.total
@@ -761,7 +780,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 }}
               >
                 <RefreshCw size={16} />
-                Refresh market data
+                Pull Market Data
               </button>
             </div>
           )}
@@ -823,8 +842,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               <strong>{meta?.filename}</strong>
             </span>
             <span>
-              {Number(meta?.totalCards ?? 0).toLocaleString()} cards ·{" "}
-              {Number(meta?.uniqueCards ?? 0).toLocaleString()} unique
+              {Number(meta?.uniqueCards ?? 0).toLocaleString()} rows
             </span>
             <span>Imported {dateLabel(meta?.importedAt)}</span>
             <span>Updated {dateLabel(meta?.updatedAt)}</span>
@@ -904,7 +922,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 <Search size={17} />
                 <input
                   aria-label="Search inventory"
-                  placeholder="Search cards, sets, numbers, or IDs…"
+                  placeholder="Search any CSV column or Product ID…"
                   value={search}
                   onChange={(event) => setSearch(event.target.value)}
                 />
@@ -1498,65 +1516,14 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 : "The complete file is validated before your saved inventory changes."}{" "}
               Cached market data is kept separately.
             </p>
-            <details
-              className="mapping-details"
-              open={
-                !file.mapping.name ||
-                !file.mapping.quantity ||
-                (!file.mapping.skuId && !file.mapping.productId)
-              }
-            >
-              <summary>Review column mapping</summary>
-              <p className="small muted">
-                TCGplayer Id is a SKU, not a product ID. Managed Inventory codes
-                are not marketplace SKUs.
-              </p>
-              <div className="mapping-grid">
-                {importFields.map(([key, label]) => (
-                  <label key={key}>
-                    {label}
-                    <select
-                      value={file.mapping[key] ?? ""}
-                      disabled={fileBusy}
-                      onChange={(event) =>
-                        setFile({
-                          ...file,
-                          mapping: {
-                            ...file.mapping,
-                            [key]: event.target.value,
-                          },
-                        })
-                      }
-                    >
-                      <option value="">Not provided</option>
-                      {file.headers.map((header) => (
-                        <option key={header}>{header}</option>
-                      ))}
-                    </select>
-                  </label>
-                ))}
-              </div>
-            </details>
-            <div className="import-preview">
-              <table>
-                <thead>
-                  <tr>
-                    {file.headers.map((header) => (
-                      <th key={header}>{header}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {file.preview.map((row, index) => (
-                    <tr key={index}>
-                      {row.map((value, i) => (
-                        <td key={i}>{value}</td>
-                      ))}
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+            <label>
+              Which column contains the TCGplayer Product IDs?
+              <select value={file.mapping.productId} disabled={fileBusy} onChange={event => setFile({...file, mapping: {productId: event.target.value}})}>
+                <option value="">Choose a column</option>
+                {file.headers.map(header => <option key={header}>{header}</option>)}
+              </select>
+            </label>
+            <p className="small muted">Use the Product ID from a TCGplayer product link, or the link itself. Keep SKU numbers in their original column. All rows and columns are preserved. Sales cover all variants of each product and are only requested when you select Pull Market Data.</p>
             {file.mode === "replace" && (
               <label className="check-label danger-text">
                 <input
@@ -1588,7 +1555,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             <button
               className="button primary"
               disabled={
-                fileBusy || (file.mode === "replace" && !replaceConfirmed)
+                fileBusy || !file.mapping.productId || (file.mode === "replace" && !replaceConfirmed)
               }
               onClick={() => void upload()}
             >
@@ -1762,15 +1729,11 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         <Modal
           error={error}
           title="Table columns"
-          onClose={() => {
-            if (meta) setSettings(meta.settings);
-            setModal(null);
-          }}
+          onClose={() => setModal(null)}
         >
           <div className="modal-body">
             <p className="muted small">
-              Choose the fields you need. Drag visible columns to rearrange
-              them, or use Earlier and Later.
+              Choose the columns you want to see. Selections and order save automatically for your next visit and CSV upload.
             </p>
             <div className="column-list">
               {[
@@ -1778,7 +1741,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 ...columns
                   .map((column) => column.key)
                   .filter((key) => !settings.visibleColumns.includes(key)),
-              ].map((key) => {
+              ].filter(key => columns.some(column => column.key === key)).map((key) => {
                 const column = columns.find((item) => item.key === key)!;
                 const shown = settings.visibleColumns.includes(key);
                 return (
@@ -1796,7 +1759,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                         (item) => item !== dragColumn,
                       );
                       list.splice(list.indexOf(key), 0, dragColumn);
-                      setSettings({ ...settings, visibleColumns: list });
+                      changeColumns(list);
                       setDragColumn(null);
                     }}
                   >
@@ -1805,15 +1768,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                       <input
                         type="checkbox"
                         checked={shown}
+                        disabled={shown && visible.length === 1}
                         onChange={(event) =>
-                          setSettings({
-                            ...settings,
-                            visibleColumns: event.target.checked
+                          changeColumns(event.target.checked
                               ? [...settings.visibleColumns, key]
                               : settings.visibleColumns.filter(
                                   (item) => item !== key,
-                                ),
-                          })
+                                ))
                         }
                       />
                       {column.label}
@@ -1848,10 +1809,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             <button
               className="button"
               onClick={() =>
-                setSettings({
-                  ...settings,
-                  visibleColumns: defaults.visibleColumns,
-                })
+                changeColumns([...(meta?.headers ?? []).map(csvColumnKey), ...defaults.visibleColumns])
               }
             >
               Reset columns
@@ -1861,13 +1819,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               disabled={saving || !settings.visibleColumns.length}
               onClick={() => {
                 setSaving(true);
-                void updateSettings(settings)
+                void columnSaveQueue.current
                   .then(() => setModal(null))
                   .catch(showError)
                   .finally(() => setSaving(false));
               }}
             >
-              Save columns
+              Done
             </button>
           </div>
         </Modal>
@@ -1875,7 +1833,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       {modal === "refresh" && (
         <Modal
           error={error}
-          title="Refresh market data"
+          title="Pull Market Data"
           onClose={() => setModal(null)}
         >
           <div className="modal-body">
@@ -1975,7 +1933,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 onClick={() => void runRefresh()}
               >
                 <RefreshCw size={16} />
-                Refresh data
+                Pull Market Data
               </button>
             )}
           </div>
@@ -2014,16 +1972,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   setExportAnalysis(event.target.value === "analysis")
                 }
               >
-                <option value="original">Original TCGplayer columns</option>
+                <option value="original">Original CSV columns</option>
                 <option value="analysis">
-                  Market analysis and calculated metrics
+                  Original CSV with market data appended
                 </option>
               </select>
             </label>
             <p className="muted small">
               {exportAnalysis
                 ? "Analysis exports include the available retrieved values. Missing values are blank."
-                : "Your original column names and values are preserved. Retrieved market prices do not overwrite your CSV."}
+                : "Your original column names and values are preserved. Retrieved market data does not overwrite your CSV."}
             </p>
           </div>
           <div className="modal-footer">

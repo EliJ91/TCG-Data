@@ -26,39 +26,41 @@ const domain = moduleUrl("../lib/domain.ts");
 const csv = await import(moduleUrl("../lib/csv.ts", { "./domain": domain }));
 const {normalizeMarket,accountSnapshot,chargedCredits,DAY}=await import(moduleUrl("../lib/api-sh.ts"));
 
-test("CSV IDs stay SKUs and quoted original values survive parsing", () => {
+test("Only the selected Product ID column is required and every original value survives", () => {
   const input =
-    '\uFEFFTCGplayer Id,Product Name,Set Name,Total Quantity,Custom Note\r\n4592422,"Card, with commas",Test Set,2,"A ""quote""\nand newline"\r\n';
-  const data = csv.prepareImport(input);
-  assert.equal(data.rows[0].info.skuId, "4592422");
-  assert.equal(data.rows[0].info.productId, "");
-  assert.equal(data.rows[0].info.quantity, 2);
+    '\uFEFFMy ID,Product Name,Custom Note\r\nhttps://www.tcgplayer.com/product/123/card,"Card, with commas","A ""quote""\nand newline"\r\n';
+  const data = csv.prepareImport(input, {productId: "My ID"});
+  assert.equal(data.rows[0].info.skuId, "");
+  assert.equal(data.rows[0].info.productId, "123");
+  assert.equal(data.rows[0].info.quantity, 0);
   assert.equal(data.rows[0].raw["Custom Note"], 'A "quote"\nand newline');
   assert.equal(data.rows[0].raw["Product Name"], "Card, with commas");
 });
-test("CSV validation rejects malformed rows, fractional quantities, and managed inventory codes", () => {
+test("CSV validation checks the selected ID while leaving unrelated data untouched", () => {
   assert.throws(() => csv.parseCSV('a,b\n"unclosed,b'), /unclosed/);
   assert.throws(() => csv.parseCSV("a,b\n1,2,3"), /fields/);
-  assert.throws(
-    () => csv.prepareImport("TCGplayer Id,Product Name,Quantity\n123,Card,1.5"),
-    /whole number/,
-  );
+  assert.equal(csv.prepareImport("Product ID,Quantity\n123,1.5").rows[0].raw.Quantity, "1.5");
   assert.throws(
     () =>
       csv.prepareImport("TCGplayerSKU,Product Name,Quantity\nCUSTOM-ID,Card,1"),
-    /Map/,
+    /Choose/,
   );
   assert.throws(
     () =>
       csv.prepareImport(
         "TCGplayer Id,Product Name,Add to Quantity\n123,Card,2",
       ),
-    /Map/,
+    /Choose/,
   );
+  assert.throws(() => csv.prepareImport("Product ID,Note\nCUSTOM-ID,anything"), /Row 2/);
+  assert.throws(() => csv.prepareImport("Product ID\nhttps://evil.test/product/123"), /Row 2/);
+  const rows = csv.prepareImport("Product ID,Anything\n123,first\n123,second").rows;
+  assert.notEqual(rows[0].info.key, rows[1].info.key);
+  assert.equal(rows[1].raw.Anything, "second");
 });
 test("CSV preparation supports more than fifty thousand cards", () => {
   const input =
-    "TCGplayer Id,Product Name,Total Quantity\n" +
+    "Product ID,Product Name,Total Quantity\n" +
     Array.from(
       { length: 50001 },
       (_, index) => index + 1000 + ",QA Card " + index + ",1",
@@ -73,6 +75,16 @@ const fixture=(range="month")=>({product_id:123,range,currency:"USD",series:[{sk
 test("Monthly daily data produces exact complete UTC-day totals",()=>{
  const {metrics,detail}=normalizeMarket(info,fixture(),{},now);
  assert.equal(metrics.units7,14);assert.equal(metrics.units30,60);assert.equal(metrics.dailySales,2);assert.equal(metrics.transactions30,30);assert.equal(metrics.unitsPerTransaction,2);assert.equal(metrics.lowerBound,false);assert.equal(detail.coveredDays,30);
+});
+test("Product-only rows combine SKU sales without inventing a shared variant price",()=>{
+ const data=fixture();data.series.push({...data.series[0],sku:78,condition:"Lightly Played"});
+ const {metrics,detail}=normalizeMarket({productId:"123"},data,{},now);
+ assert.equal(metrics.units30,120);assert.equal(metrics.dailySales,4);assert.equal(metrics.transactions30,60);
+ assert.equal(metrics.scope,"Product · all SKUs");assert.equal(metrics.marketPrice,null);assert.equal(detail.sku,null);
+ data.series[1].points=points.slice(0,-1);
+ const incomplete=normalizeMarket({productId:"123"},data,{},now).metrics;
+ assert.equal(incomplete.units7,null);
+ assert.equal(normalizeMarket({productId:"123"},{...data,range:"quarter"},{},now).metrics.dailySales,null);
 });
 test("Weekly aggregates never become exact daily rates or rolling totals",()=>{
  const {metrics}=normalizeMarket(info,fixture("quarter"),{},now);

@@ -42,6 +42,8 @@ export type Preferences = {
   maxProducts: number;
   theme: "light" | "dark";
   visibleColumns: string[];
+  columnSelectionVersion: number;
+  knownCsvColumns: string[];
   presets: {
     name: string;
     filters: Filters;
@@ -50,16 +52,10 @@ export type Preferences = {
   }[];
 };
 export const defaultColumns = [
-  "name",
-  "set",
-  "condition",
-  "printing",
-  "quantity",
-  "marketPrice",
+  "scope",
   "units30",
   "dailySales",
-  "priority",
-  "netProceeds",
+  "marketPrice",
 ];
 export const defaults: Preferences = {
   feePercent: 13.25,
@@ -79,6 +75,8 @@ export const defaults: Preferences = {
   maxProducts: 100,
   theme: "dark",
   visibleColumns: defaultColumns,
+  columnSelectionVersion: 0,
+  knownCsvColumns: [],
   presets: [],
 };
 export const emptyFilters: Filters = {
@@ -108,6 +106,7 @@ export const columns: Column[] = [
   { key: "printing", label: "Printing", kind: "text" },
   { key: "language", label: "Language", kind: "text" },
   { key: "quantity", label: "Owned", kind: "number" },
+  { key: "scope", label: "Sales coverage", kind: "text" },
   {
     key: "marketPrice",
     label: "Market price",
@@ -172,6 +171,27 @@ export const columns: Column[] = [
   { key: "inventoryValue", label: "Inventory value", kind: "money" },
   { key: "fetchedAt", label: "Market refreshed", kind: "date" },
 ];
+export const csvColumnKey = (header: string) => "csv:" + header;
+const inventoryKeys = new Set(["name", "number", "set", "productId", "skuId", "rarity", "condition", "printing", "language", "quantity"]);
+export const marketColumns = columns.filter(column => !inventoryKeys.has(column.key));
+export function inventoryColumns(headers: string[]): Column[] {
+  return [
+    ...headers.map(header => ({key: csvColumnKey(header), label: header, kind: "text" as const})),
+    ...marketColumns.map(column => headers.includes(column.label) ? {...column, label: "Market data · " + column.label} : column),
+  ];
+}
+export function inventoryPreferences(p: Preferences, headers: string[]): Preferences {
+  const rawKeys = headers.map(csvColumnKey);
+  if (p.columnSelectionVersion !== 1)
+    return {...p, columnSelectionVersion: 1, knownCsvColumns: rawKeys, visibleColumns: [...rawKeys, ...defaultColumns]};
+  const added = rawKeys.filter(key => !p.knownCsvColumns.includes(key));
+  const visibleColumns = [...p.visibleColumns];
+  const marketIndex = visibleColumns.findIndex(key => !key.startsWith("csv:"));
+  visibleColumns.splice(marketIndex < 0 ? visibleColumns.length : marketIndex, 0, ...added);
+  if (!visibleColumns.some(key => inventoryColumns(headers).some(column => column.key === key)))
+    visibleColumns.push(...rawKeys.slice(0, 1));
+  return {...p, visibleColumns, knownCsvColumns: [...new Set([...p.knownCsvColumns, ...rawKeys])]};
+}
 export function normalizePreferences(value: Partial<Preferences>): Preferences {
   const result = { ...defaults, ...value };
   for (const field of [
@@ -206,12 +226,14 @@ export function normalizePreferences(value: Partial<Preferences>): Preferences {
     ? [
         ...new Set(
           result.visibleColumns.filter((key) =>
-            columns.some((col) => col.key === key),
+            typeof key === "string" && (key.startsWith("csv:") || columns.some((col) => col.key === key)),
           ),
         ),
       ]
     : [...defaultColumns];
-  if (!result.visibleColumns.length) result.visibleColumns = ["name"];
+  if (!result.visibleColumns.length) result.visibleColumns = [...defaultColumns];
+  result.columnSelectionVersion = result.columnSelectionVersion === 1 ? 1 : 0;
+  result.knownCsvColumns = Array.isArray(result.knownCsvColumns) ? [...new Set(result.knownCsvColumns.filter(key => typeof key === "string" && key.startsWith("csv:")))] : [];
   result.presets = Array.isArray(result.presets)
     ? result.presets.slice(0, 30)
     : [];

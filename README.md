@@ -14,7 +14,11 @@ D1 transactions reserve the free allowance before requests, shared by provider a
 
 Request IDs support free `/v1/results/{request_id}` recovery for 30 days. Recovery does not charge the original body's repeated `credits_used`. Cache survives billing-period changes and inventory replacement. Coverage counters, analyzed/unanalyzed filters and new-product priority support incremental analysis over multiple months.
 
-A seller CSV's `TCGplayer Id` is a SKU, not a Product ID. Include an explicit Product ID column, reuse a previously verified mapping, or add the numeric product ID from the card's TCGplayer URL in card details. Returned SKU/condition/printing/language must match before assigning sales. There is no documented direct SKU-to-product API.SH endpoint, so the app does not spend credits guessing matches.
+Imports ask only which column contains TCGplayer Product IDs (numeric IDs or product links). Every original header, value and row is preserved, including duplicate products; names and quantities are not required. A seller CSV's `TCGplayer Id` is a SKU, so it must not be selected as a Product ID column. Legacy SKU imports can still use saved Product ID mappings.
+
+The table shows original CSV columns followed by market columns. Column selections and order save automatically and survive later uploads. Previously hidden headers stay hidden when they return; newly encountered CSV headers are shown automatically. Search includes all original values. The analysis CSV export appends market columns to the original columns, with distinct labels for collisions.
+
+Only the explicit **Pull Market Data** action starts a market lookup, after the credit estimate. Product-only rows show sales combined across all returned SKUs; the Sales coverage column identifies this. Variant prices stay unavailable when several variants exist. Exact rolling sales totals require complete daily data for every included SKU. Repeated products share one API request. Legacy SKU-specific rows still require an exact matching variant.
 
 Monthly history is daily; longer history is weekly. Exact rolling totals require every completed UTC daily bucket in the period. Missing buckets are unknown, never zero. Average units per day uses reported completed daily buckets only. Weekly data is never presented as exact daily sales. Listing/seller samples are not total supply.
 
@@ -34,13 +38,13 @@ D1 Free limits include 5 million rows read and 100,000 rows written per UTC day,
 
 - `npm run build:backend` generates the schema bootstrap from migrations and builds the standalone Worker.
 - `npm run build:pages` builds `dist/pages`. Set `VITE_API_URL` to the backend URL only.
-- `npx tsc --noEmit` and `node --test tests/core.mjs tests/credits.mjs tests/auth.mjs tests/cloudflare-auth.mjs` validate types, credits, authentication, and data normalization.
+- `npx tsc --noEmit` and `node --test tests/core.mjs tests/inventory.mjs tests/credits.mjs tests/auth.mjs tests/cloudflare-auth.mjs` validate imports, column persistence, exports, credits, authentication, and data normalization.
 - `npm run dev:pages` opens the local static frontend on port 5188.
 - `wrangler dev --config cloudflare/wrangler.jsonc --local` runs a separate local backend. Local `.dev.vars` files are ignored by Git.
 - `TEST_BACKEND=cloudflare TEST_ORIGIN=http://127.0.0.1:8787 node tests/api-smoke.mjs` checks large imports against the local backend only. It refuses production hosts and non-test inventories.
 - Deploy the backend with `wrangler deploy --config cloudflare/wrangler.jsonc` after building. This command preserves server secrets.
 
-GitHub's `CLOUDFLARE_API_URL` repository variable supplies the public URL to the Pages workflow. The workflow deliberately skips private repositories on this GitHub Free setup. Publishing requires the owner's approval to make repository source public. No API.SH secret is needed in GitHub Actions. Existing Sites hosting is retained until the replacement sign-in and GitHub Pages deployment are verified; do not remove the working site before then.
+GitHub's `CLOUDFLARE_API_URL` repository variable supplies the public URL to the Pages workflow. The workflow deliberately skips private repositories on this GitHub Free setup. Publishing requires the owner's approval to make repository source public. No API.SH secret is needed in GitHub Actions. The old OpenAI-hosted copy was deleted after GitHub Pages and Cloudflare sign-in were verified. The legacy `.openai` manifest is retained only as historical source metadata; do not use it to deploy this app.
 
 ## Provider references
 
