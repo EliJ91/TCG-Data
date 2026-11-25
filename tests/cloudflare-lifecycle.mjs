@@ -33,7 +33,7 @@ async function within(promise){
 test("A new request completes when the first request's schema lookup never settles",async()=>{
  let calls=0,started;
  const firstStarted=new Promise(resolve=>{started=resolve;});
- const worker=await loadWorker({prepare(){return {first(){calls++;if(calls===1){started();return new Promise(()=>{});}return Promise.resolve({name:"auth_codes"});}};}});
+ const worker=await loadWorker({prepare(){return {first(){calls++;if(calls===1){started();return new Promise(()=>{});}return Promise.resolve({name:"refresh_owner_started"});}};}});
  void worker.fetch(request());
  await firstStarted;
  assert.equal((await within(worker.fetch(request()))).status,200);
@@ -44,10 +44,31 @@ test("A new request completes when the first request's schema lookup never settl
 
 test("A failed initialization is retried by the next request",async()=>{
  let calls=0;
- const worker=await loadWorker({prepare(){return {async first(){if(++calls===1)throw Error("Temporary D1 lookup failure");return {name:"auth_codes"};}};}});
+ const worker=await loadWorker({prepare(){return {async first(){if(++calls===1)throw Error("Temporary D1 lookup failure");return {name:"refresh_owner_started"};}};}});
  assert.equal((await worker.fetch(request())).status,503);
  assert.equal((await worker.fetch(request())).status,200);
  assert.equal(calls,2);
+});
+
+test("Existing databases add the read indexes without rebuilding inventory", async () => {
+ const sql = new DatabaseSync(":memory:");
+ const {schema,refreshReadSchema} = await import(moduleUrl("../cloudflare/generated/schema.ts"));
+ for (const statement of schema.filter(statement=>!refreshReadSchema.includes(statement))) sql.exec(statement);
+ sql.prepare("INSERT INTO workspaces(owner) VALUES (?)").run(owner);
+ let upgrades = 0;
+ const worker = await loadWorker({
+  prepare(query) { return {query, async first() { return sql.prepare(query).get(); }}; },
+  async batch(statements) {
+   upgrades++;
+   for (const statement of statements) sql.exec(statement.query);
+  },
+ });
+ assert.equal((await worker.fetch(request())).status,200);
+ assert(sql.prepare("SELECT name FROM sqlite_master WHERE name='cards_version_product'").get());
+ assert(sql.prepare("SELECT owner FROM workspaces WHERE owner=?").get(owner));
+ assert.equal((await worker.fetch(request())).status,200);
+ assert.equal(upgrades,1);
+ sql.close();
 });
 
 test("Concurrent cold requests initialize an empty database atomically without duplicate-table errors",async()=>{

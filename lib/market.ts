@@ -1,4 +1,4 @@
-import { apiKey, AppError, buildQuery, database, preferences, workspace, type QueryInput } from "./data";
+import { apiKey, AppError, buildQuery, database, preferences, productIdExpression, workspace, type QueryInput } from "./data";
 import { API_SH_BASE, DAY, normalizeMarket, salesHistoryPath, salesOnlyResponse, mergeSalesHistory, type HistoryRange } from "./api-sh";
 import { reserveCredits, settleCredits, syncAccount, freeGet } from "./credits";
 export { normalizeMarket } from "./api-sh";
@@ -30,12 +30,21 @@ export async function provider(owner:string,runId:string,key:string,path:string,
   return stored;
 }
 export async function refreshPlan(owner:string,input:RefreshInput) {
+  const db = database(), day = Math.floor(Date.now() / DAY);
+  const usage = await db.prepare("SELECT rows_read FROM refresh_read_budget WHERE day=?").bind(day).first<number>("rows_read");
+  const limit = 2_000_000;
+  const budgetError = "Sales-history planning is paused until the next UTC day to leave database capacity for browsing.";
+  if ((usage ?? 0) >= limit) throw new AppError(budgetError, 429);
   const space=await workspace(owner),p=preferences(space),q=buildQuery(owner,space,input);
   const options={range:"annual",includePricing:false,includeListings:false,prioritizeUnanalyzed:input.prioritizeUnanalyzed!==false,maxProducts:Math.max(1,Math.min(1000,Math.floor(input.maxProducts??p.maxProducts)))};
-  const rows=await database().prepare("SELECT key,productId,skuId,fetchedAt,partial,available,analyzed,historyRange FROM ("+q.sql+")").bind(...q.values).all<Json>();
+  const rows=await db.prepare("SELECT key,productId,skuId,fetchedAt,partial,available,analyzed,historyRange FROM ("+q.sql+")").bind(...q.values).all<Json>();
   const targets=rows.results.filter(r=>!input.onlyStale||!r.analyzed||r.partial||r.historyRange!=="annual"||!r.fetchedAt||r.fetchedAt<Date.now()-p.staleHours*3600000);
   const groups=[...new Map(targets.filter(r=>/^\d+$/.test(String(r.productId??""))).map(r=>[String(r.productId),r])).values()].sort((a,b)=>(options.prioritizeUnanalyzed?Number(!!a.analyzed)-Number(!!b.analyzed):0)||Number(a.fetchedAt??0)-Number(b.fetchedAt??0));
-  const cached=await database().prepare("SELECT id,fetched_at FROM api_cache WHERE owner=? AND id LIKE ?").bind(owner,owner+"|api-sh:/tcgplayer/%").all<Json>();
+  const cachePrefix = owner + "|api-sh:/tcgplayer";
+  const cached=await db.prepare("SELECT id,fetched_at FROM api_cache WHERE owner=? AND id>=? AND id<?").bind(owner,cachePrefix+"/",cachePrefix+"0").all<Json>();
+  const reads = (rows.meta?.rows_read ?? 0) + (cached.meta?.rows_read ?? 0);
+  const used = await db.prepare("INSERT INTO refresh_read_budget(day,rows_read) VALUES (?,?) ON CONFLICT(day) DO UPDATE SET rows_read=rows_read+excluded.rows_read RETURNING rows_read").bind(day,reads).first<number>("rows_read");
+  if ((used ?? 0) >= limit) throw new AppError(budgetError, 429);
   const fresh=new Set(cached.results.filter(r=>r.fetched_at>Date.now()-p.staleHours*3600000).map(r=>r.id));
   let account:Json|null=null,accountError="";
   try {account=await syncAccount(owner);}catch(e){accountError=e instanceof Error?e.message:String(e);}
@@ -65,9 +74,22 @@ export async function startRefresh(owner:string,input:RefreshInput) {
 export async function cancelRefresh(owner:string,id:string) { await database().prepare("UPDATE refresh_runs SET status='cancelled' WHERE owner=? AND id=? AND status='running'").bind(owner,id).run();return {cancelled:true}; }
 async function applyHistory(owner:string,productId:string,history:Json,extras:Json,sources:Json,issues:string[]=[],fetchedAt=Date.now()) {
   if(String(history.product_id)!==productId||!Array.isArray(history.series)) throw new AppError("API.SH returned an unexpected product. Previous data is preserved.",502);
-  const space=await workspace(owner),skuIds=history.series.filter((s:any)=>s&&typeof s==="object"&&/^\d+$/.test(String(s.sku))).map((s:any)=>String(s.sku));
+  const space=await workspace(owner),skuIds=[...new Set<string>(history.series.flatMap((s:Json|null) => s && /^\d+$/.test(String(s.sku)) ? [String(s.sku)] : []))];
   for(const sku of skuIds) await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data").bind(owner+"|sku-map:"+sku,owner,Date.now(),JSON.stringify({productId,verified:true})).run();
-  const inventory=await database().prepare("SELECT c.card_key,c.info,c.quantity FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE c.owner=? AND c.version=? AND (json_extract(c.info,'$.productId')=? OR m.product_id=? OR json_extract(c.info,'$.skuId') IN (SELECT value FROM json_each(?)))").bind(owner,space.active_version??"",productId,productId,JSON.stringify(skuIds)).all<Json>();
+  const version = space.active_version ?? "";
+  // Each branch looks up matching keys through its own index. An OR across
+  // cards and market made SQLite read the entire inventory for every product.
+  const inventory = await database().prepare(`WITH matched AS (
+    SELECT card_key FROM cards WHERE owner=? AND version=? AND json_extract(info,'$.productId')=?
+    UNION
+    SELECT card_key FROM cards WHERE owner=? AND version=? AND json_extract(info,'$.skuId') IN (SELECT value FROM json_each(?))
+    UNION
+    SELECT card_key FROM market WHERE owner=? AND product_id=?
+  )
+  SELECT c.card_key,c.info,c.quantity FROM matched
+  CROSS JOIN cards c ON c.owner=? AND c.version=? AND c.card_key=matched.card_key`)
+    .bind(owner,version,productId,owner,version,JSON.stringify(skuIds),owner,productId,owner,version)
+    .all<Json>();
   for(const row of inventory.results) {
     const previous=await database().prepare("SELECT data,detail,fetched_at FROM market WHERE owner=? AND card_key=?").bind(owner,row.card_key).first<Json>();
     if(previous && previous.fetched_at>fetchedAt && JSON.parse(previous.data).historyRange==="annual")continue;
@@ -87,11 +109,15 @@ async function applyHistory(owner:string,productId:string,history:Json,extras:Js
   }
 }
 export async function refreshStep(owner:string,runId:string,cardKey:string) {
-  const run=await activeRun(owner,runId);
+  await activeRun(owner,runId);
   const target=await database().prepare("SELECT id FROM refresh_targets WHERE id=? AND owner=?").bind(runId+"|"+cardKey,owner).first();
   if(!target) throw new AppError("This product is not part of the approved refresh.",403);
   const marker=await cache(owner,"run-item:"+runId+":"+cardKey);if(marker)return JSON.parse(marker.data);
-  const space=await workspace(owner),q=buildQuery(owner,space,{selected:[cardKey]}),row=await database().prepare("SELECT productId FROM ("+q.sql+")").bind(...q.values).first<Json>();
+  const space = await workspace(owner);
+  const row = await database().prepare(`SELECT ${productIdExpression} AS productId
+    FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key
+    WHERE c.owner=? AND c.version=? AND c.card_key=?`)
+    .bind(owner,space.active_version??"",cardKey).first<{productId:string|null}>();
   if(!row?.productId)throw new AppError("A verified Product ID is required.",409);
   const productId=String(row.productId),claim=await database().prepare("INSERT OR IGNORE INTO refresh_products (id,owner,run_id,product_id,status) VALUES (?,?,?,?,'running')").bind(runId+":"+productId,owner,runId,productId).run();
   if(!claim.meta.changes) throw new AppError("This product was already requested in this refresh.",409);

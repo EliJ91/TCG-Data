@@ -10,7 +10,7 @@ function moduleUrl(path,replacements={}) {
 }
 const sql=new DatabaseSync(":memory:");
 for(const name of readdirSync(new URL("../drizzle",import.meta.url)).filter(name=>name.endsWith(".sql")).sort())sql.exec(readFileSync(new URL("../drizzle/"+name,import.meta.url),"utf8"));
-function statement(query){let args=[];return {bind(...values){args=values;return this},async first(){return sql.prepare(query).get(...args)??null},async all(){return {results:sql.prepare(query).all(...args)}},async run(){return this.sync()},sync(){return {meta:{changes:Number(sql.prepare(query).run(...args).changes)}}}};}
+function statement(query){let args=[];return {bind(...values){args=values;return this},async first(column){const row=sql.prepare(query).get(...args);return (column ? row?.[column] : row)??null},async all(){return {results:sql.prepare(query).all(...args)}},async run(){return this.sync()},sync(){return {meta:{changes:Number(sql.prepare(query).run(...args).changes)}}}};}
 globalThis.inventoryTestEnv={DB:{prepare:statement,async batch(statements){sql.exec("BEGIN");try{const results=statements.map(s=>s.sync());sql.exec("COMMIT");return results}catch(e){sql.exec("ROLLBACK");throw e}}}};
 const domainUrl=moduleUrl("../lib/domain.ts"),csvUrl=moduleUrl("../lib/csv.ts",{"./domain":domainUrl});
 const csv=await import(csvUrl),domain=await import(domainUrl);
@@ -178,4 +178,96 @@ test("Only sales quantities can be charged and dates filter the saved history, i
    await assert.rejects(()=>market.provider(owner,started.id,'test','/tcgplayer/v1/listings?id=123',24),/Only sales-quantity/);
    assert.equal(sql.prepare("SELECT COUNT(*) AS total FROM api_requests").get().total,charged);
  } finally {globalThis.fetch=realFetch;delete globalThis.inventoryTestEnv.API_SH_API_KEY;}
+});
+
+test("A 100-product pull uses indexed lookups in a 50,000-card inventory", async () => {
+ const pullOwner = "large-pull";
+ const version = "active";
+ const now = Date.now();
+ const sku = "701";
+ const cacheInsert = sql.prepare("INSERT INTO api_cache(id,owner,fetched_at,data) VALUES (?,?,?,?)");
+ const insertCard = sql.prepare("INSERT INTO cards(id,owner,version,card_key,info,quantity) VALUES (?,?,?,?,?,1)");
+ sql.prepare("INSERT INTO workspaces(owner,active_version) VALUES (?,?)").run(pullOwner,version);
+ sql.exec("BEGIN");
+ for (let id=1;id<=50000;id++) {
+  insertCard.run(pullOwner+":"+id,pullOwner,version,"card:"+id,JSON.stringify({productId:String(id)}));
+ }
+ insertCard.run(pullOwner+":sku",pullOwner,version,"legacy-sku",JSON.stringify({skuId:sku}));
+ insertCard.run(pullOwner+":saved",pullOwner,version,"legacy-saved",JSON.stringify({skuId:"702"}));
+ sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,'{}','{}')")
+   .run(pullOwner+"|legacy-saved",pullOwner,"legacy-saved","1",now-1);
+ const keys = Array.from({length:100},(_,i)=>"card:"+(i+1));
+ for (let id=1;id<=keys.length;id++) {
+  const path = "/tcgplayer/v1/price-history?id="+id+"&range=annual";
+  const body = {product_id:id,range:"annual",series:[{sku:id===1 ? Number(sku) : 1000+id,points:[{date:"2026-01-01",quantity_sold:id}]}]};
+  cacheInsert.run(pullOwner+"|api-sh:"+path,pullOwner,now,JSON.stringify({body,path,fetchedAt:now}));
+ }
+ sql.exec("COMMIT");
+
+ const db = globalThis.inventoryTestEnv.DB;
+ const prepare = db.prepare;
+ let lookups = 0;
+ db.prepare = query => {
+  const stmt = prepare(query);
+  if (query.startsWith("WITH matched AS")) {
+   const bind = stmt.bind;
+   stmt.bind = function(...args) {
+    const steps = sql.prepare("EXPLAIN QUERY PLAN "+query).all(...args).map(row=>row.detail);
+    for (const index of ["cards_version_product","cards_version_sku","market_owner_product","cards_version_key"]) {
+     assert(steps.some(step=>step.startsWith("SEARCH") && step.includes(index)),steps.join("\n"));
+    }
+    assert(!steps.some(step=>step.startsWith("SCAN cards") || step.startsWith("SCAN market")),steps.join("\n"));
+    lookups++;
+    return bind.apply(this,args);
+   };
+  }
+  return stmt;
+ };
+ const realFetch = globalThis.fetch;
+ globalThis.inventoryTestEnv.API_SH_API_KEY = "local-test-only-key";
+ globalThis.fetch = async input => {
+  assert.equal(new URL(String(input)).pathname,"/v1/account");
+  return Response.json({account:{id:"large-pull",status:"active"},credits:{free:1000,free_resets_at:new Date(now+86400000).toISOString()},spend:{this_month:0,monthly_limit:1000,period:"UTC"}});
+ };
+ try {
+  const started = await market.startRefresh(pullOwner,{selected:keys,maxProducts:100,approvedCost:0});
+  assert.equal(started.keys.length,100);
+  let result;
+  for (const key of started.keys) {
+   result = await market.refreshStep(pullOwner,started.id,key);
+   assert.equal(result.error,undefined);
+  }
+  assert.equal(result.status,"complete");
+  assert.equal(result.completed,100);
+  assert.equal(lookups,100);
+  assert.equal(sql.prepare("SELECT COUNT(*) count FROM market WHERE owner=?").get(pullOwner).count,102);
+ } finally {
+  db.prepare = prepare;
+  globalThis.fetch = realFetch;
+  delete globalThis.inventoryTestEnv.API_SH_API_KEY;
+ }
+});
+
+test("Sales planning accounts for D1 row reads and pauses while inventory browsing stays available", async () => {
+ const db = globalThis.inventoryTestEnv.DB, prepare = db.prepare;
+ const day = Math.floor(Date.now()/86400000);
+ sql.prepare("INSERT INTO refresh_read_budget(day,rows_read) VALUES (?,?) ON CONFLICT(day) DO UPDATE SET rows_read=excluded.rows_read").run(day,1999990);
+ db.prepare = query => {
+  const stmt = prepare(query);
+  if (query.startsWith("SELECT key,productId,skuId")) {
+   const all = stmt.all;
+   stmt.all = async () => ({...await all(),meta:{rows_read:15}});
+  }
+  return stmt;
+ };
+ try {
+  await assert.rejects(()=>market.refreshPlan(owner,{}),{status:429});
+  assert.equal(sql.prepare("SELECT rows_read FROM refresh_read_budget WHERE day=?").get(day).rows_read,2000005);
+  await assert.rejects(()=>market.refreshPlan(owner,{}),{status:429});
+  assert.equal(sql.prepare("SELECT rows_read FROM refresh_read_budget WHERE day=?").get(day).rows_read,2000005);
+  assert((await data.queryCards(owner,{})).rows.length > 0);
+ } finally {
+  db.prepare = prepare;
+  sql.prepare("DELETE FROM refresh_read_budget WHERE day=?").run(day);
+ }
 });

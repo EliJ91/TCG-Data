@@ -11,7 +11,7 @@ globalThis.testDB={prepare:statement,async batch(statements){sql.exec("BEGIN IMM
 const stub="data:text/javascript;base64,"+Buffer.from(`export class AppError extends Error {constructor(message,status){super(message);this.status=status}}; export const database=()=>globalThis.testDB,apiKey=async()=>"test-key-not-real",workspace=async(owner)=>({owner});`).toString("base64");
 const adapter=url("../lib/api-sh.ts");
 const credits=await import(url("../lib/credits.ts",{"./data":stub,"./api-sh":adapter}));
-const market=await import(url("../lib/market.ts",{"./data":"data:text/javascript;base64,"+Buffer.from(`export class AppError extends Error {};export const database=()=>globalThis.testDB;export const apiKey=async()=>"test",workspace=async()=>({}),preferences=()=>({}),buildQuery=()=>({});`).toString("base64"),"./api-sh":adapter,"./credits":url("../lib/credits.ts",{"./data":stub,"./api-sh":adapter})}));
+const market=await import(url("../lib/market.ts",{"./data":"data:text/javascript;base64,"+Buffer.from(`export class AppError extends Error {};export const database=()=>globalThis.testDB;export const apiKey=async()=>"test",workspace=async()=>({}),preferences=()=>({}),buildQuery=()=>({}),productIdExpression="";`).toString("base64"),"./api-sh":adapter,"./credits":url("../lib/credits.ts",{"./data":stub,"./api-sh":adapter})}));
 let dailyLimit=null,dailyUsed=0,free=3,reset=new Date(Date.now()+30*86400000).toISOString(),calls=[];
 const realFetch=globalThis.fetch;
 globalThis.fetch=async (url)=>{calls.push(String(url));return Response.json({account:{id:"shared",status:"active"},credits:{free,total:free+10000,payg:10000,free_resets_at:reset},spend:{this_month:0,today:dailyUsed,monthly_limit:1000,daily_limit:dailyLimit,period:"UTC"}})};

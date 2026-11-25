@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import {
   sqliteTable,
   text,
@@ -56,6 +57,8 @@ export const cards = sqliteTable(
     quantity: real("quantity").notNull(),
   },
   (table) => [
+    index("cards_version_product").on(table.owner, table.version, sql`json_extract(info, '$.productId')`),
+    index("cards_version_sku").on(table.owner, table.version, sql`json_extract(info, '$.skuId')`),
     uniqueIndex("cards_version_key").on(
       table.owner,
       table.version,
@@ -74,7 +77,10 @@ export const market = sqliteTable(
     data: text("data").notNull(),
     detail: text("detail").notNull(),
   },
-  (table) => [uniqueIndex("market_owner_card").on(table.owner, table.cardKey)],
+  (table) => [
+    uniqueIndex("market_owner_card").on(table.owner, table.cardKey),
+    index("market_owner_product").on(table.owner, table.productId, table.cardKey),
+  ],
 );
 export const apiCache = sqliteTable("api_cache", {
   id: text("id").primaryKey(),
@@ -92,7 +98,7 @@ export const refreshRuns = sqliteTable("refresh_runs", {
   spent: real("spent").notNull().default(0),
   total: integer("total").notNull(),
   detail: text("detail").notNull(),
-});
+}, (t) => [index("refresh_owner_started").on(t.owner, t.startedAt)]);
 export const refreshProducts = sqliteTable("refresh_products", {
   id: text("id").primaryKey(),
   owner: text("owner").notNull(),
@@ -129,11 +135,22 @@ export const apiRequests = sqliteTable("api_requests", {
   status: text("status").notNull(),
   requestId: text("request_id"),
   metadata: text("metadata").notNull().default("{}"),
-}, (t) => [index("requests_owner_date").on(t.owner,t.createdAt)]);
+}, (t) => [
+  index("requests_owner_date").on(t.owner,t.createdAt),
+  index("requests_account_date").on(t.accountId, t.createdAt),
+  index("requests_run").on(t.runId),
+]);
 
 export const authCodes = sqliteTable("auth_codes", {
   id: text("id").primaryKey(),
   owner: text("owner").notNull(),
   challenge: text("challenge").notNull(),
   expiresAt: integer("expires_at").notNull(),
+});
+
+// D1 reports the number of rows scanned by each refresh plan. Keep headroom
+// for browsing even if plans are regenerated repeatedly in the same UTC day.
+export const refreshReadBudget = sqliteTable("refresh_read_budget", {
+  day: integer("day").primaryKey(),
+  rowsRead: integer("rows_read").notNull().default(0),
 });

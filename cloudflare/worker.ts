@@ -1,6 +1,6 @@
 import {env} from "cloudflare:workers";
 import {handleApi} from "../lib/http-api";
-import {schema} from "./generated/schema";
+import {schema,refreshReadSchema} from "./generated/schema";
 import {allowedOrigin,authenticatedOwner,challengeFor,oauthCookie,randomCode,readOauthCookie,sign,verify} from "./auth";
 let schemaReady=false;
 async function ensureSchema(){
@@ -9,11 +9,12 @@ async function ensureSchema(){
  if(!db)throw new Error("Database binding is missing.");
  // Cache only completed state. Pending D1 work belongs to the current request
  // and must never be shared with a later request if this one ends early.
- const existing=await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='auth_codes'").first();
- if(!existing){
-  // Concurrent cold starts can each initialize safely. The completion table
-  // is still created last, in the same atomic batch as the rest of the schema.
-  await db.batch(schema.map(sql=>db.prepare(sql.replace(/^CREATE (TABLE|(?:UNIQUE )?INDEX) (?!IF NOT EXISTS )/i,"CREATE $1 IF NOT EXISTS "))));
+ const existing=await db.prepare("SELECT name FROM sqlite_master WHERE name IN ('auth_codes','refresh_owner_started') ORDER BY name DESC LIMIT 1").first<{name:string}>();
+ if(existing?.name!=="refresh_owner_started"){
+  // Initialize new databases or upgrade existing ones atomically. The final
+  // index marks completion. IF NOT EXISTS handles concurrent cold starts.
+  const pending=existing ? refreshReadSchema : schema;
+  await db.batch(pending.map(sql=>db.prepare(sql.replace(/^CREATE (TABLE|(?:UNIQUE )?INDEX) (?!IF NOT EXISTS )/i,"CREATE $1 IF NOT EXISTS "))));
  }
  schemaReady=true;
 }

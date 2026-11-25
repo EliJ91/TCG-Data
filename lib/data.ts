@@ -374,6 +374,8 @@ const marketFields = columns.filter(
       "fetchedAt",
     ].includes(column.key),
 );
+export const productIdExpression = "COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract((SELECT data FROM api_cache WHERE id=c.owner||'|sku-map:'||json_extract(c.info,'$.skuId')),'$.productId'))";
+
 export function expressions(p: Preferences) {
   const result: Record<string, string> = {};
   for (const key of [
@@ -389,8 +391,7 @@ export function expressions(p: Preferences) {
     result[key] = "json_extract(c.info,'$." + key + "')";
   for (const column of marketFields)
     result[column.key] = "json_extract(m.data,'$." + column.key + "')";
-  result.productId =
-    "COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract((SELECT data FROM api_cache WHERE id=c.owner||'|sku-map:'||json_extract(c.info,'$.skuId')),'$.productId'))";
+  result.productId = productIdExpression;
   result.quantity = "c.quantity";
   result.fetchedAt = "m.fetched_at";
   result.unitsSold = "COALESCE(json_extract(m.data,'$.unitsSold'),(SELECT CASE WHEN COUNT(*)=0 OR SUM(CASE WHEN json_extract(h.value,'$.units') IS NULL OR json_extract(h.value,'$.units')<0 THEN 1 ELSE 0 END)>0 THEN NULL ELSE SUM(json_extract(h.value,'$.units')) END FROM json_each(m.detail,'$.history') h))";
