@@ -1,5 +1,5 @@
 import { apiKey, AppError, buildQuery, database, preferences, workspace, type QueryInput } from "./data";
-import { API_SH_BASE, DAY, normalizeMarket, ranges, type HistoryRange } from "./api-sh";
+import { API_SH_BASE, DAY, normalizeMarket, type HistoryRange } from "./api-sh";
 import { reserveCredits, settleCredits, syncAccount, freeGet } from "./credits";
 export { normalizeMarket } from "./api-sh";
 type Json=Record<string,any>;
@@ -7,8 +7,11 @@ type RefreshInput=QueryInput & {onlyStale?:boolean;range?:HistoryRange;includePr
 async function cache(owner:string,path:string) { return database().prepare("SELECT data,fetched_at FROM api_cache WHERE id=? AND owner=?").bind(owner+"|api-sh:"+path,owner).first<{data:string;fetched_at:number}>(); }
 async function saveCache(owner:string,path:string,body:Json) { await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data").bind(owner+"|api-sh:"+path,owner,Date.now(),JSON.stringify(body)).run(); }
 async function activeRun(owner:string,id:string) { const row=await database().prepare("SELECT * FROM refresh_runs WHERE owner=? AND id=?").bind(owner,id).first<Json>(); if(!row||row.status!=="running") throw new AppError("Refresh cancelled or already finished.",409); return row; }
-function paths(id:string,options:Json) { return ["/tcgplayer/v1/price-history?id="+id+"&range="+options.range,...(options.includePricing?["/tcgplayer/v1/product?id="+id+"&sku_prices=1"]:[]),...(options.includeListings?["/tcgplayer/v1/listings?id="+id+"&limit=50&page=1"]:[])]; }
+// Sales history is the only paid endpoint this app may request, including
+// old saved options and refresh runs created before this restriction.
+function paths(id:string) { return ["/tcgplayer/v1/price-history?id="+id+"&range=month"]; }
 export async function provider(owner:string,runId:string,key:string,path:string,staleHours:number) {
+  if(!/^\/tcgplayer\/v1\/price-history\?id=\d+&range=month$/.test(path)) throw new AppError("Only monthly sales-history requests are enabled.",403);
   const old=await cache(owner,path);
   if(old&&Date.now()-old.fetched_at<staleHours*3600000) return JSON.parse(old.data);
   await activeRun(owner,runId);
@@ -27,9 +30,9 @@ export async function provider(owner:string,runId:string,key:string,path:string,
 }
 export async function refreshPlan(owner:string,input:RefreshInput) {
   const space=await workspace(owner),p=preferences(space),q=buildQuery(owner,space,input);
-  const options={range:ranges.includes(input.range as HistoryRange)?input.range!:p.historyRange,includePricing:input.includePricing===true,includeListings:input.includeListings===true,prioritizeUnanalyzed:input.prioritizeUnanalyzed!==false,maxProducts:Math.max(1,Math.min(1000,Math.floor(input.maxProducts??p.maxProducts)))};
-  const rows=await database().prepare("SELECT key,productId,skuId,fetchedAt,partial,available,analyzed FROM ("+q.sql+")").bind(...q.values).all<Json>();
-  const targets=rows.results.filter(r=>!input.onlyStale||!r.analyzed||r.partial||!r.fetchedAt||r.fetchedAt<Date.now()-p.staleHours*3600000);
+  const options={range:"month",includePricing:false,includeListings:false,prioritizeUnanalyzed:input.prioritizeUnanalyzed!==false,maxProducts:Math.max(1,Math.min(1000,Math.floor(input.maxProducts??p.maxProducts)))};
+  const rows=await database().prepare("SELECT key,productId,skuId,fetchedAt,partial,available,analyzed,granularity FROM ("+q.sql+")").bind(...q.values).all<Json>();
+  const targets=rows.results.filter(r=>!input.onlyStale||!r.analyzed||r.partial||r.granularity!=="daily"||!r.fetchedAt||r.fetchedAt<Date.now()-p.staleHours*3600000);
   const groups=[...new Map(targets.filter(r=>/^\d+$/.test(String(r.productId??""))).map(r=>[String(r.productId),r])).values()].sort((a,b)=>(options.prioritizeUnanalyzed?Number(!!a.analyzed)-Number(!!b.analyzed):0)||Number(a.fetchedAt??0)-Number(b.fetchedAt??0));
   const cached=await database().prepare("SELECT id,fetched_at FROM api_cache WHERE owner=? AND id LIKE ?").bind(owner,owner+"|api-sh:/tcgplayer/%").all<Json>();
   const fresh=new Set(cached.results.filter(r=>r.fetched_at>Date.now()-p.staleHours*3600000).map(r=>r.id));
@@ -39,11 +42,12 @@ export async function refreshPlan(owner:string,input:RefreshInput) {
   const chosen:Json[]=[];
   for(const group of groups) {
     if(chosen.length>=options.maxProducts) break;
-    const needed=paths(String(group.productId),options).filter(path=>!fresh.has(owner+"|api-sh:"+path)).length;
+    const needed=paths(String(group.productId)).filter(path=>!fresh.has(owner+"|api-sh:"+path)).length;
     if(needed>budget) continue;
     chosen.push(group);budget-=needed;cost+=needed;
   }
-  return {keys:chosen.map(r=>r.key),cards:targets.length,groups:chosen.length,eligibleProducts:groups.length,deferredProducts:groups.length-chosen.length,unresolved:new Set(targets.filter(r=>!r.productId).map(r=>r.skuId||r.key)).size,minimumCredits:cost,maximumCredits:cost,minimumRequests:cost,maximumRequests:cost,options,account,accountError,note:"One credit per product history; optional SKU pricing and one listing/competition page each add one credit. Fresh local results cost zero. "+(groups.length-chosen.length)+" products deferred to a later refresh. SKU-only cards need a verified Product ID; they are never treated as zero sales."};
+  const deferred=groups.length-chosen.length;
+  return {keys:chosen.map(r=>r.key),cards:targets.length,groups:chosen.length,eligibleProducts:groups.length,deferredProducts:deferred,unresolved:new Set(targets.filter(r=>!r.productId).map(r=>r.skuId||r.key)).size,minimumCredits:cost,maximumCredits:cost,minimumRequests:cost,maximumRequests:cost,options,account,accountError,note:"Sales history only. One credit per unique Product ID. Fresh saved results cost no credits."+(deferred?" "+deferred+" products remain for a later pull within your free credit balance and product limit.":"")};
 }
 export async function startRefresh(owner:string,input:RefreshInput) {
   const space=await workspace(owner);await apiKey(space);
@@ -66,7 +70,7 @@ async function applyHistory(owner:string,productId:string,history:Json,extras:Js
   const inventory=await database().prepare("SELECT c.card_key,c.info,c.quantity FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE c.owner=? AND c.version=? AND (json_extract(c.info,'$.productId')=? OR m.product_id=? OR json_extract(c.info,'$.skuId') IN (SELECT value FROM json_each(?)))").bind(owner,space.active_version??"",productId,productId,JSON.stringify(skuIds)).all<Json>();
   for(const row of inventory.results) {
     const previous=await database().prepare("SELECT data,detail,fetched_at FROM market WHERE owner=? AND card_key=?").bind(owner,row.card_key).first<Json>();
-    if(previous && previous.fetched_at>fetchedAt)continue;
+    if(previous && previous.fetched_at>fetchedAt && !(history.range==="month" && JSON.parse(previous.data).granularity!=="daily"))continue;
     const normalized=normalizeMarket({...JSON.parse(row.info),quantity:row.quantity},history,extras,fetchedAt);
     if(!normalized.metrics.available && previous && JSON.parse(previous.data).available)continue;
     normalized.metrics.partial=issues.length>0;
@@ -85,13 +89,12 @@ export async function refreshStep(owner:string,runId:string,cardKey:string) {
   if(!claim.meta.changes) throw new AppError("This product was already requested in this refresh.",409);
   let error:string|undefined;
   try {
-    const options=JSON.parse(run.detail).options,p=preferences(space),key=await apiKey(space),results:Json[]=[],issues:string[]=[];
-    for(const path of paths(productId,options)) {
+    const p=preferences(space),key=await apiKey(space),results:Json[]=[],issues:string[]=[];
+    for(const path of paths(productId)) {
       try {results.push(await provider(owner,runId,key,path,p.staleHours));}
       catch(e){if(!results.length)throw e;issues.push(e instanceof Error?e.message:String(e));if(e instanceof AppError&&[403,409,429].includes(e.status))await cancelRefresh(owner,runId);break;}
     }
-    const extras:Json={};for(const r of results.slice(1)){if(r.path.startsWith("/tcgplayer/v1/product?"))extras.product=r.body;if(r.path.startsWith("/tcgplayer/v1/listings?"))extras.listings=r.body;}
-    await applyHistory(owner,productId,results[0].body,extras,results.map(r=>({path:r.path,requestId:r.requestId,fetchedAt:r.fetchedAt})),issues,results[0].fetchedAt);
+    await applyHistory(owner,productId,results[0].body,{},results.map(r=>({path:r.path,requestId:r.requestId,fetchedAt:r.fetchedAt})),issues,results[0].fetchedAt);
     if(issues.length)error=issues.join(" ");
   }catch(e){error=e instanceof Error?e.message:String(e);if(e instanceof AppError&&[403,409,429].includes(e.status))await cancelRefresh(owner,runId);}
   await database().prepare("UPDATE refresh_products SET status=? WHERE id=? AND owner=?").bind(error?"error":"complete",runId+":"+productId,owner).run();

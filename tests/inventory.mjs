@@ -14,7 +14,10 @@ function statement(query){let args=[];return {bind(...values){args=values;return
 globalThis.inventoryTestEnv={DB:{prepare:statement,async batch(statements){sql.exec("BEGIN");try{const results=statements.map(s=>s.sync());sql.exec("COMMIT");return results}catch(e){sql.exec("ROLLBACK");throw e}}}};
 const domainUrl=moduleUrl("../lib/domain.ts"),csvUrl=moduleUrl("../lib/csv.ts",{"./domain":domainUrl});
 const csv=await import(csvUrl),domain=await import(domainUrl);
-const data=await import(moduleUrl("../lib/data.ts",{"cloudflare:workers":"data:text/javascript,export const env=globalThis.inventoryTestEnv;","./domain":domainUrl,"./csv":csvUrl}));
+const dataUrl=moduleUrl("../lib/data.ts",{"cloudflare:workers":"data:text/javascript,export const env=globalThis.inventoryTestEnv;","./domain":domainUrl,"./csv":csvUrl});
+const data=await import(dataUrl);
+const adapterUrl=moduleUrl("../lib/api-sh.ts"),creditsUrl=moduleUrl("../lib/credits.ts",{"./data":dataUrl,"./api-sh":adapterUrl});
+const market=await import(moduleUrl("../lib/market.ts",{"./data":dataUrl,"./api-sh":adapterUrl,"./credits":creditsUrl}));
 const owner="inventory-test";
 async function upload(text,mode="replace") {
  const prepared=csv.prepareImport(text,{productId:"Lookup"});
@@ -62,4 +65,38 @@ test("Rows with no name or quantity import and repeated updates retain row count
  assert.equal(state.uniqueCards,2);
  const rows=(await data.queryCards(owner,{sort:'rowNo',direction:'asc'})).rows;
  assert.deepEqual(rows.map(row=>row['csv:Custom']),['changed','two']);
+});
+test("Only monthly sales history can be charged, including old saved options and old refresh runs",async()=>{
+ const realFetch=globalThis.fetch,paid=[];
+ globalThis.inventoryTestEnv.API_SH_API_KEY="local-test-only-key";
+ const history=id=>({product_id:Number(id),range:"month",currency:"USD",series:[{sku:77,points:[]}],credits_used:1});
+ globalThis.fetch=async input=>{
+   const url=new URL(String(input));
+   if(url.pathname==="/v1/account")return Response.json({account:{id:"sales-test",status:"active"},credits:{free:1000,total:2000,payg:1000,free_resets_at:new Date(Date.now()+30*86400000).toISOString()},spend:{this_month:0,today:0,monthly_limit:1000,daily_limit:null,period:"UTC"}});
+   assert.equal(url.pathname,"/tcgplayer/v1/price-history");assert.equal(url.searchParams.get("range"),"month");
+   paid.push(url.href);return Response.json(history(url.searchParams.get("id")),{headers:{"x-credits-used":"1","x-request-id":crypto.randomUUID()}});
+ };
+ try {
+   await upload('Lookup,Custom\n123,one\n123,two\n456,three');
+   const state=await data.savePreferences(owner,{settings:{historyRange:"annual",includePricing:true,includeListings:true}});
+   assert.equal(state.settings.historyRange,"month");assert.equal(state.settings.includePricing,false);assert.equal(state.settings.includeListings,false);
+   const rows=(await data.queryCards(owner,{})).rows;
+   for(const row of rows.filter(row=>row.productId==='123'))sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?)").run(owner+'|'+row.key,owner,row.key,'123',Date.now(),JSON.stringify({analyzed:true,available:true,granularity:'weekly'}),'{}');
+   const path='/tcgplayer/v1/price-history?id=123&range=month',fetchedAt=Date.now()-1000;
+   sql.prepare("INSERT INTO api_cache(id,owner,fetched_at,data) VALUES (?,?,?,?)").run(owner+'|api-sh:'+path,owner,fetchedAt,JSON.stringify({body:history(123),requestId:'cached',fetchedAt,path}));
+   const input={onlyStale:true,range:'annual',includePricing:true,includeListings:true,maxProducts:100};
+   const plan=await market.refreshPlan(owner,input);
+   assert.equal(plan.groups,2);assert.equal(plan.maximumCredits,1);assert.equal(paid.length,0);
+   assert.equal(plan.options.range,'month');assert.equal(plan.options.includePricing,false);assert.equal(plan.options.includeListings,false);
+   const started=await market.startRefresh(owner,{...input,approvedCost:1});
+   sql.prepare("UPDATE refresh_runs SET detail=json_set(detail,'$.options.range','annual','$.options.includePricing',1,'$.options.includeListings',1) WHERE id=?").run(started.id);
+   for(const key of started.keys){const result=await market.refreshStep(owner,started.id,key);assert.equal(result.error,undefined);}
+   assert.equal(paid.length,1);assert(paid[0].includes('id=456'));
+   assert((await data.queryCards(owner,{})).rows.every(row=>row.granularity==='daily'));
+   assert.equal((await market.refreshPlan(owner,input)).groups,0);
+   const charged=sql.prepare("SELECT COUNT(*) AS total FROM api_requests").get().total;
+   await assert.rejects(()=>market.provider(owner,started.id,'test','/tcgplayer/v1/product?id=123',24),/Only monthly/);
+   await assert.rejects(()=>market.provider(owner,started.id,'test','/tcgplayer/v1/listings?id=123',24),/Only monthly/);
+   assert.equal(sql.prepare("SELECT COUNT(*) AS total FROM api_requests").get().total,charged);
+ } finally {globalThis.fetch=realFetch;delete globalThis.inventoryTestEnv.API_SH_API_KEY;}
 });

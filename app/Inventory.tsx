@@ -281,8 +281,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     [importProgress, setImportProgress] = useState(0),
     [importId, setImportId] = useState<string | null>(null),
     [replaceConfirmed, setReplaceConfirmed] = useState(false);
-  const [scope, setScope] = useState("filtered"),
-    [onlyStale, setOnlyStale] = useState(true),
+  const [scope, setScope] = useState("all"),
     [plan, setPlan] = useState<RecordValue | null>(null),
     [planBusy, setPlanBusy] = useState(false);
   const [refresh, setRefresh] = useState<RecordValue | null>(null),
@@ -320,7 +319,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     direction,
     ...(choice === "selected" ? { selected: [...selected] } : {}),
   });
-  const refreshOptions={range:settings.historyRange,includePricing:settings.includePricing,includeListings:settings.includeListings,prioritizeUnanalyzed:settings.prioritizeUnanalyzed,maxProducts:settings.maxProducts};
+  const refreshOptions={prioritizeUnanalyzed:settings.prioritizeUnanalyzed,maxProducts:settings.maxProducts};
   const showError = (problem: unknown) =>
     setError(problem instanceof Error ? problem.message : String(problem));
   const changeFilters = (next: Filters) => {
@@ -569,7 +568,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     if (modal !== "refresh") return;
     let active = true;
     setPlanBusy(true);
-    void api("market/plan", { ...scopeQuery(scope), onlyStale, ...refreshOptions })
+    void api("market/plan", { ...scopeQuery(scope), onlyStale: true, ...refreshOptions })
       .then((value) => {
         if (active) setPlan(value);
       })
@@ -583,16 +582,11 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   }, [
     modal,
     scope,
-    onlyStale,
-    filters,
     selected,
-    settings.historyRange,
-    settings.includePricing,
-    settings.includeListings,
     settings.maxProducts,
     settings.prioritizeUnanalyzed,
   ]);
-  const runRefresh = async (choice = scope, stale = onlyStale) => {
+  const runRefresh = async () => {
     setError("");
     setRefreshErrors([]);
     setRefreshRunning(true);
@@ -600,8 +594,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setModal(null);
     try {
       const started = await api("market/start", {
-        ...scopeQuery(choice),
-        onlyStale: stale,
+        ...scopeQuery(scope),
+        onlyStale: true,
         ...refreshOptions,
         approvedCost: plan?.maximumCredits,
       });
@@ -780,6 +774,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 disabled={!hasInventory || activeRefresh || fileBusy}
                 onClick={() => {
                   setPlan(null);
+                  setScope("all");
                   setModal("refresh");
                 }}
               >
@@ -1209,7 +1204,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   setModal("refresh");
                 }}
               >
-                Refresh selected
+                Pull selected sales history
               </button>
               <button
                 className="text-button"
@@ -1840,46 +1835,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         >
           <div className="modal-body">
             <p className="muted">
-              Choose which cards to refresh. Your inventory and original CSV
-              values will stay intact.
+              Pull daily sales history for the past month for {scope === "selected" ? selected.size.toLocaleString() + " selected rows" : "your inventory"}.
+              Filter the saved results however you like afterward.
             </p>
-            <fieldset className="scope-options">
-              {[
-                ["all", "Entire inventory"],
-                ["filtered", "Filtered results"],
-                ["selected", "Selected cards (" + selected.size + ")"],
-              ].map(([value, label]) => (
-                <label key={value}>
-                  <input
-                    type="radio"
-                    name="refresh-scope"
-                    value={value}
-                    checked={scope === value}
-                    disabled={value === "selected" && !selected.size}
-                    onChange={() => setScope(value)}
-                  />
-                  {label}
-                </label>
-              ))}
-            </fieldset>
-            <label className="check-label">
-              <input
-                type="checkbox"
-                checked={onlyStale}
-                onChange={(event) => setOnlyStale(event.target.checked)}
-              />
-              Only missing or outdated market data
-            </label>
-            <details className="refresh-options" open>
-              <summary>Data to refresh</summary>
-              <label>Sales history period<select value={settings.historyRange} onChange={e=>setSettings({...settings,historyRange:e.target.value as Preferences["historyRange"]})}><option value="month">Past month · daily data</option><option value="quarter">Past quarter · weekly data</option><option value="semi-annual">Past 6 months · weekly data</option><option value="annual">Past year · weekly data</option></select></label>
-              <label className="check-label"><input type="checkbox" checked={settings.prioritizeUnanalyzed} onChange={e=>setSettings({...settings,prioritizeUnanalyzed:e.target.checked})}/>Analyze new products first</label>
-              <details><summary>Optional pricing and competition</summary>
-                <label className="check-label"><input type="checkbox" checked={settings.includePricing} onChange={e=>setSettings({...settings,includePricing:e.target.checked})}/>Current SKU prices · +1 credit per product</label>
-                <label className="check-label"><input type="checkbox" checked={settings.includeListings} onChange={e=>setSettings({...settings,includeListings:e.target.checked})}/>Listing and seller sample · +1 credit per product</label>
-                <p className="small muted">One page, up to 50 listings across variants. No extra requests per variant.</p>
-              </details>
-            </details>
             <div className="estimate">
               {planBusy ? (
                 <p>
@@ -1888,7 +1846,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 </p>
               ) : plan ? (
                 <>
-                  <span className="eyebrow">ESTIMATED API USAGE</span>
+                  <span className="eyebrow">ESTIMATED COST</span>
                   <strong>
                     {plan.minimumCredits === plan.maximumCredits
                       ? plan.maximumCredits.toLocaleString()
@@ -1898,12 +1856,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                     credits
                   </strong>
                   <p>
-                    {plan.groups.toLocaleString()} unique products · up to{" "}
-                    {plan.maximumRequests.toLocaleString()} requests
+                    {plan.groups.toLocaleString()} unique Product IDs to update
                   </p>
                   <p className="small muted">{plan.note}</p>
                   {plan.accountError&&<p className="danger-text">{plan.accountError}</p>}
-                  {plan.account&&<p className="small muted">{plan.account.freeRemaining} free credits remain. Reset {new Date(plan.account.resetAt).toUTCString()}. {plan.account.monthlyUsed} credits used this UTC month.</p>}
+                  {plan.account&&<p className="small muted">{Number(plan.account.available??0).toLocaleString()} free credits available.</p>}
+                  {!plan.groups&&!plan.deferredProducts&&!plan.unresolved&&!plan.accountError&&<p className="small muted">Your saved sales history is up to date. No credits are needed.</p>}
                   {!!plan.unresolved&&<p className="small muted">{plan.unresolved} SKU groups need a Product ID. Add it in card details or your CSV.</p>}
                 </>
               ) : (

@@ -217,9 +217,9 @@ export function normalizePreferences(value: Partial<Preferences>): Preferences {
     result.autoMinutes === 0 ? 0 : Math.max(15, result.autoMinutes);
   result.staleHours = Math.max(1, result.staleHours);
   result.autoMinutes=0;
-  result.historyRange=["month","quarter","semi-annual","annual"].includes(result.historyRange)?result.historyRange:"month";
-  result.includePricing=result.includePricing===true;
-  result.includeListings=result.includeListings===true;
+  result.historyRange="month";
+  result.includePricing=false;
+  result.includeListings=false;
   result.prioritizeUnanalyzed=result.prioritizeUnanalyzed!==false;
   result.theme=result.theme==="light"?"light":"dark";
   result.visibleColumns = Array.isArray(result.visibleColumns)
