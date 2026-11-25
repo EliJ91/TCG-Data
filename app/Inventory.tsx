@@ -35,6 +35,7 @@ import {
 } from "../lib/domain";
 import { type Mapping } from "../lib/csv";
 import ImportWorker from "../lib/import.worker?worker";
+import InventoryCell from "./InventoryCell";
 
 const HistoryChart = lazy(() => import("./HistoryChart"));
 type RecordValue = Record<string, any>;
@@ -459,7 +460,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     uploadAbort.current = controller;
     let id: string | null = null;
     try {
-      const prepared: { headers: string[]; rows: ImportRow[] } =
+      const prepared: { headers: string[]; rows: ImportRow[]; duplicateCount: number } =
         await runImportWorker(file.text, "prepare", file.mapping);
       localStorage.setItem("sortswift-product-id-column", file.mapping.productId);
       const started = await api<{ id: string }>(
@@ -506,7 +507,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       setDirection("asc");
       setPage(1);
       setNotice(
-        "Inventory saved. Market data will refresh only when you request it.",
+        "Inventory saved." + (prepared.duplicateCount ? " " + prepared.duplicateCount.toLocaleString() + " duplicate entries removed; the first row for each Product ID was kept." : "") + " Sales history is pulled only when you request it.",
       );
       setImportProgress(100);
     } catch (problem) {
@@ -1263,7 +1264,11 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                                 row[column.key] !== null
                                   ? "≥"
                                   : ""}
-                                {formatValue(row[column.key], column.kind)}
+                                <InventoryCell
+                                  value={row[column.key]}
+                                  column={column}
+                                  cardName={row.name || "Card " + row.productId}
+                                />
                               </span>
                             )}
                           </td>
@@ -1432,7 +1437,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                 {file.headers.map(header => <option key={header}>{header}</option>)}
               </select>
             </label>
-            <p className="small muted">Use the Product ID from a TCGplayer product link, or the link itself. Keep SKU numbers in their original column. All rows and columns are preserved. Sales cover all variants of each product and are only requested when you select Pull Sales History.</p>
+            <p className="small muted">Use the Product ID from a TCGplayer product link, or the link itself. The first row for each Product ID is kept; duplicate IDs are removed. Original columns are preserved. Sales history is pulled only when you request it.</p>
             {file.mode === "replace" && (
               <label className="check-label danger-text">
                 <input

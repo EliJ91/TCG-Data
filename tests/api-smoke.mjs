@@ -97,7 +97,7 @@ const rows = Array.from({ length: 50050 }, (_, index) => row(index));
 rows.push(row(0, 2));
 let state = await importRows(rows);
 assert.equal(state.uniqueCards, 50050);
-assert.equal(state.totalCards, 50052);
+assert.equal(state.totalCards, 50050);
 const query = (value) =>
   api("cards?q=" + encodeURIComponent(JSON.stringify(value)));
 const first = await query({
@@ -106,7 +106,7 @@ const first = await query({
   page: 1,
   pageSize: 25,
 });
-assert.equal(first.rows[0].quantity, 3);
+assert.equal(first.rows[0].quantity, 1);
 assert.equal(first.matches, 50050);
 assert.equal(first.rows[0].marketPrice, undefined);
 assert.equal(first.value, null);
@@ -119,7 +119,7 @@ const filtered = await query({
   },
   pageSize: 25,
 });
-assert.equal(filtered.matches, 1);
+assert.equal(filtered.matches, 0);
 const missing = await query({
   filters: { freshness: "missing" },
   pageSize: 100,
@@ -160,12 +160,12 @@ assert(exported.includes('Preserve, ""quotes""'));
 const updateRows = [row(50049, 4), row(60000, 5)];
 state = await importRows(updateRows, "update", "qa-update.csv");
 assert.equal(state.uniqueCards, 50051);
-assert.equal(state.totalCards, 50060);
+assert.equal(state.totalCards, 50058);
 state = await importRows(updateRows, "update", "qa-update.csv");
 assert.equal(state.uniqueCards, 50051);
 assert.equal(
   state.totalCards,
-  50060,
+  50058,
   "Repeating an update must not add quantities a second time.",
 );
 const invalid = await api("imports/start", {

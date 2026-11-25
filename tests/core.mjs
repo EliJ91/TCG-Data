@@ -55,8 +55,15 @@ test("CSV validation checks the selected ID while leaving unrelated data untouch
   assert.throws(() => csv.prepareImport("Product ID,Note\nCUSTOM-ID,anything"), /Row 2/);
   assert.throws(() => csv.prepareImport("Product ID\nhttps://evil.test/product/123"), /Row 2/);
   const rows = csv.prepareImport("Product ID,Anything\n123,first\n123,second").rows;
-  assert.notEqual(rows[0].info.key, rows[1].info.key);
-  assert.equal(rows[1].raw.Anything, "second");
+  assert.equal(rows.length,1);
+  assert.equal(rows[0].raw.Anything, "first");
+});
+test("Repeated IDs, leading zeros and product links keep the first original row only",()=>{
+ const data=csv.prepareImport('Lookup,Note,Quantity\n00123,first,0005\n123,later,99\nhttps://www.tcgplayer.com/product/123/card,url,3\n124,other,1',{productId:'Lookup'});
+ assert.equal(data.rows.length,2);assert.equal(data.duplicateCount,2);
+ assert.equal(data.rows[0].info.productId,'123');assert.equal(data.rows[0].info.key,'product:123|row:0');
+ assert.equal(data.rows[0].raw.Lookup,'00123');assert.equal(data.rows[0].raw.Note,'first');assert.equal(data.rows[0].raw.Quantity,'0005');
+ assert.equal(data.rows[1].raw.Note,'other');
 });
 test("CSV preparation supports more than fifty thousand cards", () => {
   const input =

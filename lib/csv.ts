@@ -85,18 +85,18 @@ export function mapColumns(headers: string[]): Mapping {
 }
 export function productIdFrom(value: string) {
   const text = value.trim();
-  if (/^\d+$/.test(text)) return text;
+  if (/^\d+$/.test(text)) return text.replace(/^0+(?=\d)/, "");
   try {
     const url = new URL(text);
     if (["tcgplayer.com", "www.tcgplayer.com"].includes(url.hostname) && ["http:", "https:"].includes(url.protocol))
-      return url.pathname.match(/^\/product\/(\d+)(?:\/|$)/)?.[1] ?? "";
+      return url.pathname.match(/^\/product\/(\d+)(?:\/|$)/)?.[1]?.replace(/^0+(?=\d)/, "") ?? "";
   } catch {}
   return "";
 }
 export function prepareImport(
   text: string,
   mapping?: Mapping,
-): { headers: string[]; rows: ImportRow[] } {
+): { headers: string[]; rows: ImportRow[]; duplicateCount: number } {
   const { headers, records } = parseCSV(text);
   const selected = mapping ?? mapColumns(headers);
   if (!selected.productId || !headers.includes(selected.productId))
@@ -113,8 +113,9 @@ export function prepareImport(
     ]),
   );
   const problems: string[] = [];
-  const occurrences = new Map<string, number>();
-  const rows = records.map((record, index) => {
+  const seen = new Set<string>(), rows: ImportRow[] = [];
+  let duplicateCount = 0;
+  records.forEach((record, index) => {
     const get = (key: string) =>
       indices[key] >= 0 ? record[indices[key]].trim() : "";
     const skuId = "",
@@ -123,12 +124,12 @@ export function prepareImport(
       rawQuantity = get("quantity").replace(/,/g, ""),
       quantity = rawQuantity && Number.isSafeInteger(Number(rawQuantity)) && Number(rawQuantity) >= 0 ? Number(rawQuantity) : 0;
     if (!productId) problems.push("Row " + (index + 2) + ": enter a numeric Product ID or a TCGplayer product link in the selected column.");
+    if (productId && seen.has(productId)) {duplicateCount++;return;}
+    if (productId) seen.add(productId);
     const condition = "", printing = "", language = "";
-    const occurrence = occurrences.get(productId) ?? 0;
-    occurrences.set(productId, occurrence + 1);
-    // Keep every CSV row, including repeated products, with stable occurrence IDs.
-    const key = "product:" + productId + "|row:" + occurrence;
-    return {
+    // Retain the first row's key so existing saved sales remain linked.
+    const key = "product:" + productId + "|row:0";
+    rows.push({
       info: {
         key,
         skuId,
@@ -143,7 +144,7 @@ export function prepareImport(
         quantity,
       },
       raw: Object.fromEntries(headers.map((header, i) => [header, record[i]])),
-    };
+    });
   });
   if (problems.length)
     throw new Error(
@@ -152,7 +153,7 @@ export function prepareImport(
           ? "\nAnd " + (problems.length - 12) + " more issues."
           : ""),
     );
-  return { headers, rows };
+  return { headers, rows, duplicateCount };
 }
 export function csvCell(value: unknown) {
   const text = value === null || value === undefined ? "" : String(value);

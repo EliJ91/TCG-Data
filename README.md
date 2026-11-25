@@ -14,9 +14,11 @@ D1 transactions reserve the free allowance before requests, shared by provider a
 
 Request IDs support free `/v1/results/{request_id}` recovery for 30 days. Recovery does not charge the original body's repeated `credits_used`. Cache survives billing-period changes and inventory replacement. Coverage counters, analyzed/unanalyzed filters and new-product priority support incremental analysis over multiple months.
 
-Imports ask only which column contains TCGplayer Product IDs (numeric IDs or product links). Every original header, value and row is preserved, including duplicate products; names and quantities are not required. A seller CSV's `TCGplayer Id` is a SKU, so it must not be selected as a Product ID column. Legacy SKU imports can still use saved Product ID mappings.
+Imports ask only which column contains TCGplayer Product IDs (numeric IDs or product links). Every original header and the first row for each normalized Product ID are preserved; duplicate IDs are removed, and names and quantities are not required. A seller CSV's `TCGplayer Id` is a SKU, so it must not be selected as a Product ID column. Legacy SKU imports can still use saved Product ID mappings.
 
-The table shows original CSV columns followed by market columns. Column selections and order save automatically and survive later uploads. Previously hidden headers stay hidden when they return; newly encountered CSV headers are shown automatically. Search includes all original values. The analysis CSV export appends market columns to the original columns, with distinct labels for collisions.
+The table shows original CSV columns followed by market columns. Column selections and order save automatically and survive later uploads. Duplicate rows are removed before upload and enforced again on the server across chunks and later updates, keeping the first row rather than adding quantities together. Existing saved sales stay linked to the retained Product ID. Previously hidden headers stay hidden when they return; newly encountered CSV headers are shown automatically. Search includes all original values. The analysis CSV export appends market columns to the original columns, with distinct labels for collisions.
+
+Imported CDN image links display as 64 × 90 px thumbnails without cropping. Clicking a thumbnail opens its original image. Images load lazily and use no API.SH credits; CSV exports keep the original URL values.
 
 Only the explicit **Pull Sales History** action starts a lookup after the credit estimate. It retrieves full available history for the inventory, or the explicitly selected rows, independently of the table's date filter. There are no period or extra-data selections before pulling.
 

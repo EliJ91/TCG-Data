@@ -25,25 +25,26 @@ async function upload(text,mode="replace") {
  await data.uploadChunk(owner,id,0,prepared.rows);
  return data.commitImport(owner,id);
 }
-test("Arbitrary CSV rows, duplicate product IDs and original headers survive import, search, sort and export",async()=>{
+test("Unique CSV rows and original headers survive import, search, sort and export",async()=>{
  const realFetch=globalThis.fetch;
  globalThis.fetch=async()=>{throw new Error("Import and browsing must not request provider data");};
  try {
  const header=`Odd ' " header`;
  const input=[['Lookup','My label',header,'Units sold'],['123','First','0005','original'],['123','Second','keep, this',''],['456','Third','0001','source price']].map(row=>row.map(csv.csvCell).join(',')).join('\n');
  const state=await upload(input);
- assert.equal(state.uniqueCards,3);
+ assert.equal(state.uniqueCards,2);
  let result=await data.queryCards(owner,{sort:"rowNo",direction:"asc"});
- assert.equal(result.rows.length,3);assert.equal(result.rows[0]['csv:My label'],'First');assert.equal(result.rows[1]['csv:My label'],'Second');
+ assert.equal(result.rows.length,2);assert.equal(result.rows[0]['csv:My label'],'First');assert.equal(result.rows[1]['csv:My label'],'Third');
  assert.equal(result.rows[0]['csv:'+header],'0005');assert.equal(result.rows[0].marketPrice,undefined);
- assert.equal((await data.queryCards(owner,{filters:{search:'keep, this'}})).matches,1);
+ assert.equal((await data.queryCards(owner,{filters:{search:'keep, this'}})).matches,0);
  assert.equal((await data.queryCards(owner,{sort:'csv:'+header,direction:'asc'})).rows[0]['csv:My label'],'Third');
  const original=await (await data.exportInventory(owner,{})).text();
- assert.deepEqual(csv.parseCSV(original),csv.parseCSV(input));
+ const expected=csv.parseCSV(input);expected.records.splice(1,1);
+ assert.deepEqual(csv.parseCSV(original),expected);
  const appended=csv.parseCSV(await (await data.exportInventory(owner,{analysis:true,sort:"rowNo",direction:"asc"})).text());
  assert.deepEqual(appended.headers.slice(0,4),['Lookup','My label',header,'Units sold']);
  assert(appended.headers.includes('Sales · Units sold'));
- assert.equal(appended.records[1][1],'Second');
+ assert.equal(appended.records[1][1],'Third');
  } finally {globalThis.fetch=realFetch;}
 });
 test("Column choices and order persist through later uploads, including temporarily absent headers",async()=>{
@@ -62,10 +63,41 @@ test("Rows with no name or quantity import and repeated updates retain row count
  await upload('Lookup,Custom\n123,one\n123,two');
  await upload('Lookup,Custom\n123,changed\n123,two','update');
  const state=await upload('Lookup,Custom\n123,changed\n123,two','update');
- assert.equal(state.uniqueCards,2);
+ assert.equal(state.uniqueCards,1);
  const rows=(await data.queryCards(owner,{sort:'rowNo',direction:'asc'})).rows;
- assert.deepEqual(rows.map(row=>row['csv:Custom']),['changed','two']);
+ assert.deepEqual(rows.map(row=>row['csv:Custom']),['changed']);
 });
+test("Server removes duplicates across chunks and updates while retaining first-row values and cached sales",async()=>{
+ const realFetch=globalThis.fetch;
+ globalThis.fetch=async()=>{throw Error('An import must not request sales data');};
+ try {
+  const prepared=csv.prepareImport('Lookup,Custom,Quantity\n11,first,2\n22,other,4',{productId:'Lookup'});
+  const duplicate=structuredClone(prepared.rows[0]);duplicate.info.key='product:11|row:99';duplicate.info.quantity=99;duplicate.raw.Custom='later';
+  const {id}=await data.startImport(owner,{mode:'replace',filename:'qa-chunks.csv',headers:prepared.headers,count:3});
+  await data.uploadChunk(owner,id,0,prepared.rows);
+  await data.uploadChunk(owner,id,2,[duplicate]);
+  await data.uploadChunk(owner,id,0,prepared.rows);
+  let state=await data.commitImport(owner,id);
+  assert.equal(state.uniqueCards,2);assert.equal(state.totalCards,6);
+  let rows=(await data.queryCards(owner,{sort:'rowNo',direction:'asc'})).rows;
+  assert.deepEqual(rows.map(row=>row['csv:Custom']),['first','other']);
+  assert.equal(csv.parseCSV(await (await data.exportInventory(owner,{})).text()).records.length,2);
+  const version=sql.prepare('SELECT active_version FROM workspaces WHERE owner=?').get(owner).active_version;
+  const old=sql.prepare('SELECT * FROM inventory_rows WHERE owner=? AND version=? AND card_key=?').get(owner,version,'product:22|row:0');
+  const legacyInfo={...JSON.parse(old.info),key:'product:22|row:1',quantity:100};
+  sql.prepare('INSERT INTO inventory_rows(id,owner,version,row_no,card_key,info,raw) VALUES (?,?,?,?,?,?,?)').run(version+':legacy',owner,version,99,legacyInfo.key,JSON.stringify(legacyInfo),JSON.stringify({...JSON.parse(old.raw),Custom:'legacy duplicate'}));
+  sql.prepare('INSERT INTO cards(id,owner,version,card_key,info,quantity) VALUES (?,?,?,?,?,?)').run(version+':legacy',owner,version,legacyInfo.key,JSON.stringify(legacyInfo),100);
+  sql.prepare('INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?)').run(owner+'|product:11|row:0',owner,'product:11|row:0','11',Date.now(),JSON.stringify({analyzed:true,available:true,unitsSold:7}),JSON.stringify({history:[]}));
+  state=await upload('Lookup,Custom,Quantity\n11,updated,3\n11,ignored,99','update');
+  assert.equal(state.uniqueCards,2);assert.equal(state.totalCards,7);
+  rows=(await data.queryCards(owner,{sort:'rowNo',direction:'asc'})).rows;
+  assert.deepEqual(rows.map(row=>row['csv:Custom']),['updated','other']);
+  assert.equal(rows[0].unitsSold,7,'The retained Product ID keeps its saved sales');
+  state=await upload('Lookup,Custom,Quantity\n11,updated,3\n11,ignored,99','update');
+  assert.equal(state.uniqueCards,2);assert.equal(state.totalCards,7);
+ } finally {globalThis.fetch=realFetch;}
+});
+
 test("Only sales quantities can be charged and dates filter the saved history, including old saved options and old refresh runs",async()=>{
  const realFetch=globalThis.fetch,paid=[];
  globalThis.inventoryTestEnv.API_SH_API_KEY="local-test-only-key";
@@ -97,19 +129,19 @@ test("Only sales quantities can be charged and dates filter the saved history, i
    const before=paid.length;
    const window={filters:{dateFrom:'2026-01-08',dateTo:'2026-01-14'}};
    const filtered=await data.queryCards(owner,window);
-   assert.deepEqual(filtered.rows.map(row=>row.unitsSold).sort(),[4,5,5]);
-   assert.equal((await data.queryCards(owner,{filters:{dateFrom:'2026-01-08',dateTo:'2026-01-14',numeric:[{field:'unitsSold',min:'5',max:'5'}]}})).matches,2);
+   assert.deepEqual(filtered.rows.map(row=>row.unitsSold).sort(),[4,5]);
+   assert.equal((await data.queryCards(owner,{filters:{dateFrom:'2026-01-08',dateTo:'2026-01-14',numeric:[{field:'unitsSold',min:'5',max:'5'}]}})).matches,1);
    assert((await data.queryCards(owner,{filters:{dateFrom:'2027-01-01'}})).rows.every(row=>row.unitsSold===null));
    assert((await data.queryCards(owner,{filters:{dateFrom:'2026-01-09',dateTo:'2026-01-14'}})).rows.every(row=>row.unitsSold===null),'A partial week is never invented as a daily count');
-   assert.equal((await data.queryCards(owner,{filters:{dateFrom:'2026-01-15',dateTo:'2026-01-15',numeric:[{field:'unitsSold',min:'0',max:'0'}]}})).matches,2);
+   assert.equal((await data.queryCards(owner,{filters:{dateFrom:'2026-01-15',dateTo:'2026-01-15',numeric:[{field:'unitsSold',min:'0',max:'0'}]}})).matches,1);
    await assert.rejects(()=>data.queryCards(owner,{filters:{dateFrom:'2026-02-01',dateTo:'2026-01-01'}}),/valid sales date range/);
    const exported=csv.parseCSV(await (await data.exportInventory(owner,{...window,analysis:true})).text());
    const soldIndex=exported.headers.indexOf('Units sold');assert(soldIndex>=0);
-   assert.deepEqual(exported.records.map(row=>Number(row[soldIndex])).sort(),[4,5,5]);
+   assert.deepEqual(exported.records.map(row=>Number(row[soldIndex])).sort(),[4,5]);
    assert.equal(paid.length,before,'Changing dates, filtering and exporting never request provider data');
    const repeated=await market.startRefresh(owner,{...input,onlyStale:false,approvedCost:0});
    for(const key of repeated.keys)await market.refreshStep(owner,repeated.id,key);
-   assert.deepEqual((await data.queryCards(owner,{})).rows.map(row=>row.unitsSold).sort((a,b)=>a-b),[7,7,11]);
+   assert.deepEqual((await data.queryCards(owner,{})).rows.map(row=>row.unitsSold).sort((a,b)=>a-b),[7,11]);
    assert.equal(paid.length,before,'Reapplying saved history neither double-counts sales nor spends credits');
    for(const row of sql.prepare('SELECT data,detail FROM market WHERE owner=?').all(owner)) assert(!/market_price|listingLow|netProceeds|marketPrice/.test(row.data+row.detail));
    for(const row of sql.prepare('SELECT data FROM api_cache WHERE owner=?').all(owner)) {const saved=JSON.parse(row.data);if(saved.body&&saved.path?.includes('raw=0'))assert(!JSON.stringify(saved.body).includes('market_price'));}

@@ -9,7 +9,7 @@ import {
   type Filters,
   type ImportRow,
 } from "./domain";
-import { csvCell } from "./csv";
+import { csvCell, productIdFrom } from "./csv";
 
 export type Workspace = {
   owner: string;
@@ -241,13 +241,13 @@ export async function uploadChunk(
       !row.raw
     )
       throw new AppError("An inventory row is invalid.");
-  const data = rows.map((row, index) => ({
-    id: id + ":" + (start + index),
-    rowNo: start + index,
-    key: row.info.key,
-    info: JSON.stringify(row.info),
-    raw: JSON.stringify(row.raw),
-  }));
+  const data = rows.map((row, index) => {
+    const productId = /^\d+$/.test(row.info.productId) ? productIdFrom(String(row.info.productId)) : "";
+    const skuId = /^\d+$/.test(row.info.skuId) ? String(row.info.skuId).replace(/^0+(?=\d)/, "") : "";
+    const key = productId ? "product:" + productId + "|row:0" : "sku:" + skuId;
+    return {id: id + ":" + (start + index), rowNo: start + index, key,
+      info: JSON.stringify({...row.info, productId, skuId, key}), raw: JSON.stringify(row.raw)};
+  });
   await database()
     .prepare(
       "INSERT INTO inventory_rows (id,owner,version,row_no,card_key,info,raw) SELECT json_extract(value,'$.id'),?,?,json_extract(value,'$.rowNo'),json_extract(value,'$.key'),json_extract(value,'$.info'),json_extract(value,'$.raw') FROM json_each(?) WHERE 1 ON CONFLICT(id) DO UPDATE SET info=excluded.info,raw=excluded.raw,card_key=excluded.card_key",
@@ -301,15 +301,20 @@ export async function commitImport(owner: string, id: string) {
       : JSON.parse(session.headers);
   const statements: D1PreparedStatement[] = [];
   const settings = inventoryPreferences(preferences(space), headers);
+  const canonicalId = (alias: string, field: string) => "COALESCE(NULLIF(LTRIM(json_extract("+alias+".info,'$."+field+"'),'0'),''),'0')";
+  const identity = (alias: string) => "CASE WHEN COALESCE(json_extract("+alias+".info,'$.productId'),'')<>'' THEN 'product:'||"+canonicalId(alias,"productId")+"||'|row:0' ELSE 'sku:'||"+canonicalId(alias,"skuId")+" END";
   if (session.mode === "update" && space.active_version)
     statements.push(
       database()
         .prepare(
-          "INSERT INTO inventory_rows (id,owner,version,row_no,card_key,info,raw) SELECT ?||':old:'||old.row_no,old.owner,?,?+old.row_no,old.card_key,old.info,old.raw FROM inventory_rows old WHERE old.owner=? AND old.version=? AND NOT EXISTS (SELECT 1 FROM inventory_rows newer WHERE newer.owner=old.owner AND newer.version=? AND newer.card_key=old.card_key)",
+          "INSERT INTO inventory_rows (id,owner,version,row_no,card_key,info,raw) SELECT ?||':old:'||old.row_no,old.owner,?,?+old.row_no,old.card_key,old.info,old.raw FROM inventory_rows old WHERE old.owner=? AND old.version=? AND NOT EXISTS (SELECT 1 FROM inventory_rows newer INDEXED BY rows_card WHERE newer.owner=old.owner AND newer.version=? AND newer.card_key="+identity("old")+")",
         )
         .bind(id, id, session.expected, owner, space.active_version, id),
     );
   statements.push(
+    // Validate the complete upload first, then deduplicate the staged version
+    // atomically. This also covers old clients and duplicates across chunks.
+    database().prepare("DELETE FROM inventory_rows WHERE owner=? AND version=? AND row_no NOT IN (SELECT MIN(r.row_no) FROM inventory_rows r WHERE r.owner=? AND r.version=? GROUP BY "+identity("r")+")").bind(owner,id,owner,id),
     database()
       .prepare(
         "INSERT INTO cards (id,owner,version,card_key,info,quantity) SELECT ?||':'||card_key,owner,version,card_key,MIN(info),SUM(CAST(json_extract(info,'$.quantity') AS REAL)) FROM inventory_rows WHERE owner=? AND version=? GROUP BY owner,version,card_key",
