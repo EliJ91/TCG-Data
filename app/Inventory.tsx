@@ -697,10 +697,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     }
   };
   const moveColumn = (key: string, offset: number) => {
+    const shown = visible.map(column => column.key);
+    const shownIndex = shown.indexOf(key), shownTarget = shownIndex + offset;
+    if (shownTarget < 0 || shownTarget >= shown.length) return;
     const list = [...settings.visibleColumns],
       index = list.indexOf(key),
-      target = index + offset;
-    if (target < 0 || target >= list.length) return;
+      target = list.indexOf(shown[shownTarget]);
     [list[index], list[target]] = [list[target], list[index]];
     changeColumns(list);
   };
@@ -1733,7 +1735,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         >
           <div className="modal-body">
             <p className="muted small">
-              Choose the columns you want to see. Selections and order save automatically for your next visit and CSV upload.
+              Choose visible columns. Use Move left or Move right to reorder the table. Your choices save automatically for your next visit and CSV upload.
             </p>
             <div className="column-list">
               {[
@@ -1777,26 +1779,27 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                                 ))
                         }
                       />
-                      {column.label}
+                      <span>{column.label}</span>
                     </label>
                     {shown && (
                       <div>
                         <button
                           className="text-button"
-                          disabled={settings.visibleColumns.indexOf(key) === 0}
+                          disabled={visible[0]?.key === key}
+                          title="Move this column one position to the left in the table"
                           onClick={() => moveColumn(key, -1)}
                         >
-                          Earlier
+                          Move left
                         </button>
                         <button
                           className="text-button"
                           disabled={
-                            settings.visibleColumns.indexOf(key) ===
-                            settings.visibleColumns.length - 1
+                            visible[visible.length - 1]?.key === key
                           }
+                          title="Move this column one position to the right in the table"
                           onClick={() => moveColumn(key, 1)}
                         >
-                          Later
+                          Move right
                         </button>
                       </div>
                     )}

@@ -937,32 +937,41 @@ tbody tr:last-child td {
 .column-list {
   margin-top: 20px;
   max-height: 50vh;
-  overflow: auto;
+  overflow-y: auto;
+  overflow-x: hidden;
+  scrollbar-gutter: stable;
+  padding-inline-end: 8px;
 }
 .column-option {
-  display: flex;
+  display: grid;
+  grid-template-columns: 15px minmax(0, 1fr) auto;
   align-items: center;
   gap: 9px;
   border-bottom: 1px solid #edf1ed;
-  padding: 11px 0;
+  padding: 11px 8px;
   color: #95a197;
 }
 .column-option.visible {
   color: #4c6353;
 }
-.column-option > label {
-  flex: 1;
+.modal-body .column-option > label {
+  min-width: 0;
   display: flex;
   align-items: center;
   gap: 10px;
-  font-size: 13px;
+  font-size: 14px;
+}
+.column-option > label > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
 }
 .column-option > div {
   display: flex;
   gap: 10px;
 }
 .column-option .text-button {
-  font-size: 11px;
+  font-size: 14px;
+  white-space: nowrap;
 }
 .file-summary {
   display: flex;
@@ -1438,11 +1447,14 @@ tbody tr:last-child td {
     grid-template-columns: 120px 1fr;
     gap: 10px;
   }
-  .column-option > div {
-    gap: 7px;
+  .column-option {
+    grid-template-columns: 15px minmax(0, 1fr);
+    row-gap: 4px;
   }
-  .column-option .text-button {
-    font-size: 10px;
+  .column-option > div {
+    grid-column: 2;
+    justify-content: flex-end;
+    gap: 16px;
   }
 }
 @media (prefers-reduced-motion: reduce) {
