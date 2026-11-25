@@ -1,3 +1,4 @@
+import { limitOperation, syncMetadata, syncInventory, syncChanges } from "./inventory-sync";
 import {
   AppError,
   database,
@@ -13,7 +14,7 @@ import {
   exportInventory,
 } from "./data";
 import {
-  refreshPlan,
+  prepareRefreshPlan,
   startRefresh,
   refreshStep,
   cancelRefresh,
@@ -32,30 +33,40 @@ export async function handleApi(request:Request,owner:string,path:string,allowed
       const body = (await request.json()) as any;
       if (path === "preferences")
         return Response.json(await savePreferences(owner, body));
-      if (path === "imports/start")
+      if (path === "imports/start") {
+        await limitOperation(owner,"import-start",15,86_400_000);
         return Response.json(await startImport(owner, body));
+      }
       if (path === "imports/chunk")
         return Response.json(
           await uploadChunk(owner, body.id, body.start, body.rows),
         );
       if (path === "imports/commit")
-        return Response.json(await commitImport(owner, body.id));
+        return Response.json(await commitImport(owner, body.id, body.sync === true));
       if (path === "imports/cancel")
         return Response.json(await cancelImport(owner, body.id));
       if (path === "market/recover") return Response.json(await recoverResult(owner,body.id));
       if (path === "market/product") return Response.json(await linkProduct(owner,body.key,String(body.productId??"")));
       if (path === "market/plan")
-        return Response.json(await refreshPlan(owner, body));
+        return Response.json(await prepareRefreshPlan(owner, body));
       if (path === "market/start")
         return Response.json(await startRefresh(owner, body));
-      if (path === "market/step")
+      if (path === "market/step") {
+        await limitOperation(owner,"sales-products",2000,86_400_000);
         return Response.json(await refreshStep(owner, body.id, body.key));
+      }
       if (path === "market/cancel")
         return Response.json(await cancelRefresh(owner, body.id));
       if (path === "export") return exportInventory(owner, body);
     } else {
+      if (path === "sync/meta") return Response.json(await syncMetadata(owner,url.searchParams.get("version")));
+      if (path === "sync/inventory") return Response.json(await syncInventory(owner,url.searchParams));
+      if (path === "sync/changes") return Response.json(await syncChanges(owner,url.searchParams));
       if (path === "account") return Response.json(await syncAccount(owner),{headers:{"Cache-Control":"no-store"}});
-      if (path === "account/details") return Response.json(await accountDetails(owner),{headers:{"Cache-Control":"no-store"}});
+      if (path === "account/details") {
+        await limitOperation(owner,"account-details",6,60_000);
+        return Response.json(await accountDetails(owner),{headers:{"Cache-Control":"no-store"}});
+      }
       if (path === "state")
         return Response.json(await state(owner), {
           headers: { "Cache-Control": "no-store" },

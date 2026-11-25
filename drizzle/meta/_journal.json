@@ -36,6 +36,13 @@
       "when": 1795627452644,
       "tag": "0004_bound_refresh_reads",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1795628216962,
+      "tag": "0005_inventory_sync",
+      "breakpoints": true
     }
   ]
 }

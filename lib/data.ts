@@ -36,14 +36,12 @@ export class AppError extends Error {
   }
 }
 export async function workspace(owner: string) {
-  await database()
-    .prepare("INSERT OR IGNORE INTO workspaces (owner) VALUES (?)")
-    .bind(owner)
-    .run();
-  return (await database()
-    .prepare("SELECT * FROM workspaces WHERE owner=?")
-    .bind(owner)
-    .first<Workspace>())!;
+  const db = database();
+  const query = db.prepare("SELECT * FROM workspaces WHERE owner=?").bind(owner);
+  const existing = await query.first<Workspace>();
+  if (existing) return existing;
+  await db.prepare("INSERT OR IGNORE INTO workspaces (owner) VALUES (?)").bind(owner).run();
+  return (await query.first<Workspace>())!;
 }
 export const preferences = (space: Workspace) =>
   inventoryPreferences(normalizePreferences(JSON.parse(space.settings)), JSON.parse(space.headers));
@@ -80,19 +78,15 @@ export async function apiKey(_space?: Workspace) {
 export async function state(owner: string) {
   const space = await workspace(owner),
     db = database();
-  const totals = await db
-    .prepare(
-      "SELECT COUNT(*) AS uniqueCards,COALESCE(SUM(c.quantity),0) AS totalCards,MIN(json_extract(m.data,'$.historyFrom')) AS historyFrom,MAX(json_extract(m.data,'$.historyTo')) AS historyTo FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key WHERE c.owner=? AND c.version=?",
-    )
-    .bind(owner, space.active_version ?? "")
-    .first();
   const refresh = await db
     .prepare(
       "SELECT id,status,started_at,completed,failed,total,spent FROM refresh_runs WHERE owner=? ORDER BY started_at DESC LIMIT 1",
     )
     .bind(owner)
     .first();
-  const coverage = await db.prepare(`SELECT COUNT(DISTINCT COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract(a.data,'$.productId'))) AS uniqueProducts,
+  const coverage = await db.prepare(`SELECT COUNT(*) AS uniqueCards, COALESCE(SUM(c.quantity),0) AS totalCards,
+    MIN(json_extract(m.data,'$.historyFrom')) AS historyFrom, MAX(json_extract(m.data,'$.historyTo')) AS historyTo,
+    COUNT(DISTINCT COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract(a.data,'$.productId'))) AS uniqueProducts,
     COUNT(DISTINCT CASE WHEN COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0)=1 THEN COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract(a.data,'$.productId')) END) AS analyzedProducts,
     COUNT(DISTINCT CASE WHEN COALESCE(NULLIF(json_extract(c.info,'$.productId'),''),m.product_id,json_extract(a.data,'$.productId')) IS NULL THEN COALESCE(NULLIF(json_extract(c.info,'$.skuId'),''),c.card_key) END) AS unresolvedProducts
     FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN api_cache a ON a.id=c.owner||'|sku-map:'||json_extract(c.info,'$.skuId') WHERE c.owner=? AND c.version=?`).bind(owner,space.active_version??"").first<any>();
@@ -108,7 +102,6 @@ export async function state(owner: string) {
     serverManagedKey: !!env.API_SH_API_KEY,
     usage: JSON.parse(space.usage),
     importing: space.import_lock,
-    ...totals,
     refresh,
   };
 }
@@ -127,14 +120,11 @@ export async function savePreferences(
   const keys = Object.keys(input.settings ?? {}).filter(key => Object.hasOwn(settings,key)) as (keyof Preferences)[];
   const args = keys.flatMap(key => ["$." + key, JSON.stringify(settings[key])]);
   const expression = keys.length ? "json_set(settings," + keys.map(() => "?,json(?)").join(",") + ")" : "settings";
-  await database()
-    .prepare("UPDATE workspaces SET settings=" + expression + ",secret=CASE WHEN ? THEN '' ELSE secret END WHERE owner=?")
+  const saved = await database()
+    .prepare("UPDATE workspaces SET settings=" + expression + ",secret=CASE WHEN ? THEN '' ELSE secret END WHERE owner=? RETURNING *")
     .bind(...args, input.clearKey ? 1 : 0, owner)
-    .run();
-  if(input.settingsOnly){
-    const saved=await database().prepare("SELECT * FROM workspaces WHERE owner=?").bind(owner).first<Workspace>();
-    return {settings:preferences(saved!)};
-  }
+    .first<Workspace>();
+  if (input.settingsOnly) return {settings:preferences(saved!)};
   return state(owner);
 }
 export async function startImport(
@@ -284,9 +274,9 @@ export async function cancelImport(owner: string, id: string) {
   ]);
   return { cancelled: true };
 }
-export async function commitImport(owner: string, id: string) {
+export async function commitImport(owner: string, id: string, lightweight = false) {
   const session = await importSession(owner, id);
-  if (session.status === "complete") return state(owner);
+  if (session.status === "complete") return lightweight ? {saved:true} : state(owner);
   const space = await workspace(owner);
   if (session.status !== "pending" || space.import_lock !== id)
     throw new AppError("This import is no longer active.", 409);
@@ -346,6 +336,9 @@ export async function commitImport(owner: string, id: string) {
       .prepare("UPDATE imports SET status='complete' WHERE owner=? AND id=?")
       .bind(owner, id),
   );
+  if (session.mode === "update" && space.active_version)
+    statements.push(database().prepare("INSERT INTO inventory_sync(owner,version,previous_version,uploaded) VALUES (?,?,?,?)")
+      .bind(owner,id,space.active_version,session.expected));
   if (space.active_version)
     statements.push(
       database()
@@ -356,7 +349,7 @@ export async function commitImport(owner: string, id: string) {
         .bind(owner, space.active_version),
     );
   await database().batch(statements);
-  return state(owner);
+  return lightweight ? {saved:true} : state(owner);
 }
 const marketFields = columns.filter(
   (column) =>
@@ -407,7 +400,7 @@ export type QueryInput = {
   pageSize?: number;
   selected?: string[];
 };
-export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
+export function buildQuery(owner: string, space: Workspace, input: QueryInput, forCount = false) {
   const p = preferences(space),
     e = expressions(p),
     f = input.filters;
@@ -498,8 +491,7 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput) {
     // the entire inventory once per card on large imports.
     ",r.row_no AS rowNo,json_extract(m.data,'$.granularity') AS granularity,json_extract(m.data,'$.historyRange') AS historyRange,json_extract(m.data,'$.lowerBound') AS lowerBound,COALESCE(json_extract(m.data,'$.analyzed'),json_extract(m.data,'$.available'),0) AS analyzed,json_extract(m.data,'$.partial') AS partial,json_extract(m.data,'$.available') AS available FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN inventory_rows r ON r.id=(SELECT id FROM inventory_rows INDEXED BY rows_card WHERE owner=c.owner AND version=c.version AND card_key=c.card_key ORDER BY row_no LIMIT 1) WHERE " +
     where.join(" AND ") +
-    " ORDER BY " +
-    order +
+    (forCount && !limit ? "" : " ORDER BY " + order) +
     (limit ? " LIMIT " + limit : "");
   return { sql, values, e };
 }
@@ -511,13 +503,14 @@ export async function queryCards(owner: string, input: QueryInput) {
     pageSize = [25, 50, 100].includes(Number(input.pageSize))
       ? Number(input.pageSize)
       : 50;
+  const countQuery = buildQuery(owner,space,input,true);
   const total = await db
     .prepare(
       "WITH result AS (" +
-        query.sql +
+        countQuery.sql +
         ") SELECT COUNT(*) AS matches,COALESCE(SUM(quantity),0) AS units,NULL AS value,0 AS priced,MAX(fetchedAt) AS lastRefreshed FROM result",
     )
-    .bind(...query.values)
+    .bind(...countQuery.values)
     .first();
   const rows = await db
     .prepare("SELECT * FROM (" + query.sql + ") LIMIT ? OFFSET ?")

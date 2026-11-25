@@ -6,6 +6,7 @@ import {
   real,
   index,
   uniqueIndex,
+  primaryKey,
 } from "drizzle-orm/sqlite-core";
 
 export const workspaces = sqliteTable("workspaces", {
@@ -154,3 +155,24 @@ export const refreshReadBudget = sqliteTable("refresh_read_budget", {
   day: integer("day").primaryKey(),
   rowsRead: integer("rows_read").notNull().default(0),
 });
+
+export const inventorySync = sqliteTable("inventory_sync", {
+  owner: text("owner").notNull(),
+  version: text("version").notNull(),
+  previousVersion: text("previous_version").notNull(),
+  uploaded: integer("uploaded").notNull(),
+}, (t) => [primaryKey({ columns: [t.owner, t.version] })]);
+
+export const syncEvents = sqliteTable("sync_events", {
+  seq: integer("seq").primaryKey({ autoIncrement: true }),
+  owner: text("owner").notNull(),
+  kind: text("kind").notNull(),
+  subject: text("subject").notNull(),
+}, (t) => [index("sync_events_owner_seq").on(t.owner, t.seq)]);
+
+export const resourceWindows = sqliteTable("resource_windows", {
+  owner: text("owner").notNull(),
+  action: text("action").notNull(),
+  window: integer("window").notNull(),
+  used: integer("used").notNull(),
+}, (t) => [primaryKey({ columns: [t.owner, t.action] })]);

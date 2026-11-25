@@ -13,3 +13,15 @@ export async function apiFetch(path:string,init:RequestInit={}){
   if(response.status===401){sessionStorage.removeItem(sessionKey);window.dispatchEvent(new Event("tcg-session-expired"));}
   return response;
 }
+
+export function inventoryCacheScope() {
+  const backend = window.__TCG_BACKEND__;
+  const token = sessionStorage.getItem(sessionKey);
+  if (!backend || !token) return null;
+  try {
+    const payload = JSON.parse(atob(token.split(".")[0].replaceAll("-","+").replaceAll("_","/")));
+    if (payload.kind === "session" && typeof payload.owner === "string" && payload.exp > Date.now())
+      return backend+"|"+payload.owner;
+  } catch {}
+  return null;
+}

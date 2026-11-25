@@ -1,6 +1,6 @@
 "use client";
-import { lazy, Suspense, useEffect, useRef, useState, type ReactNode } from "react";
-import { apiFetch, appHome } from "../lib/client-api";
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { apiFetch, appHome, inventoryCacheScope } from "../lib/client-api";
 import {
   Layers3,
   Upload,
@@ -37,6 +37,8 @@ import {
 import { type Mapping } from "../lib/csv";
 import ImportWorker from "../lib/import.worker?worker";
 import InventoryCell from "./InventoryCell";
+import { readInventoryCache, synchronizeInventory } from "../lib/inventory-cache";
+import { describeInventory, indexInventory, localExport, queryLocalInventory, type InventorySnapshot } from "../lib/local-inventory";
 
 const HistoryChart = lazy(() => import("./HistoryChart"));
 type RecordValue = Record<string, any>;
@@ -91,9 +93,9 @@ async function api<T = any>(
     cache: "no-store",
     keepalive,
   });
-  const result = (await response.json()) as RecordValue;
+  const result = (await response.json().catch(()=>({}))) as RecordValue;
   if (!response.ok)
-    throw new Error(result.error ?? "The request could not be completed.");
+    throw Object.assign(new Error(result.error ?? (response.status>=500 ? "The database is temporarily unavailable. Saved inventory stays on this device after its first sync." : "The request could not be completed.")),{status:response.status});
   return result as T;
 }
 function Modal({
@@ -253,6 +255,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     >(null);
   const [settings, setSettings] = useState<Preferences>(defaults),
     [saving, setSaving] = useState(false);
+  const [snapshot, setSnapshot] = useState<InventorySnapshot|null>(null);
+  const snapshotRef = useRef<InventorySnapshot|null>(null);
+  const localEntries = useMemo(()=>snapshot ? indexInventory(snapshot.cards) : null,[snapshot?.cards]);
   const [preferencesReady, setPreferencesReady] = useState(false),
     [dataRevision, setDataRevision] = useState(0);
   const [accountReport,setAccountReport]=useState<RecordValue|null>(null), [accountBusy,setAccountBusy]=useState(false), [productDraft,setProductDraft]=useState("");
@@ -286,12 +291,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const fileInput = useRef<HTMLInputElement>(null),
     importMode = useRef("upload"),
     refreshCancelled = useRef(false),
-    uploadAbort = useRef<AbortController | null>(null),
-    lastAutomatic = useRef(Date.now());
+    uploadAbort = useRef<AbortController | null>(null);
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null),
     [search, setSearch] = useState("");
   const latest = useRef({ filters, sort, direction, meta });
   const settingsSaveQueue = useRef<Promise<unknown>>(Promise.resolve());
+  const pendingColumns = useRef<Partial<Preferences>|null>(null);
+  const columnSaveTimer = useRef<ReturnType<typeof setTimeout>|null>(null);
   const savedView = useRef("");
   latest.current = { filters, sort, direction, meta };
   const hasInventory = !!meta?.filename;
@@ -336,11 +342,34 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     return job;
   };
   const loadMetadata = async () => {
-    const data = await api<Metadata>("state");
+    const scope = inventoryCacheScope();
+    let data: Metadata | undefined;
+    if (scope) {
+      const cached = snapshotRef.current ?? await readInventoryCache(scope).catch(()=>null);
+      let current: InventorySnapshot|null = null;
+      try {
+        current = await synchronizeInventory(path=>api(path,undefined,AbortSignal.timeout(20000)),scope,cached);
+      } catch (problem) {
+        const status = (problem as Error & {status?:number}).status;
+        if (cached && (status === 429 || (status ?? 0) >= 500 || status === 409 || problem instanceof TypeError || (problem as Error).name === "TimeoutError")) {
+          current = cached;
+          setNotice("Showing the last synced inventory. Reload when the database is available to get the latest changes.");
+        } else if (status !== 404) throw problem;
+      }
+      if (current) {
+        const inventory = describeInventory(indexInventory(current.cards));
+        snapshotRef.current = current;
+        setSnapshot(current);
+        setFacets(inventory.facets);
+        data = {...current.meta,...inventory.totals};
+      }
+    }
+    if (!data) {
+      data = await api<Metadata>("state");
+      setFacets(await api("facets"));
+    }
     setMeta(data);
-    if(data.connected) void api("account").then(usage=>setMeta(current=>current?{...current,usage}:current)).catch(problem=>setMeta(current=>current?{...current,usage:{...current.usage,accountError:problem.message}}:current));
     setSettings(data.settings);
-    setFacets(await api("facets"));
     setDataRevision(current => current + 1);
     if (data.refresh?.status === "running") setRefresh(data.refresh);
     return data;
@@ -392,6 +421,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   }, []);
   useEffect(() => {
     if (!meta || !preferencesReady) return;
+    if (localEntries) {
+      try { setResult(queryLocalInventory(localEntries,query,settings.staleHours)); }
+      catch (problem) { showError(problem); }
+      setLoading(false);
+      return;
+    }
     const controller = new AbortController();
     setLoading(true);
     void api<Result>(
@@ -407,7 +442,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         if (!controller.signal.aborted) setLoading(false);
       });
     return () => controller.abort();
-  }, [preferencesReady, dataRevision, filters, sort, direction, page, pageSize]);
+  }, [preferencesReady, dataRevision, localEntries, filters, sort, direction, page, pageSize, settings.staleHours]);
   const currentView = JSON.stringify(normalizeView({filters, sort, direction: direction === "desc" ? "desc" : "asc", page, pageSize, view, advanced, exportScope: exportScope === "all" ? "all" : "filtered", exportAnalysis}));
   useEffect(() => {
     if (!preferencesReady) return;
@@ -419,7 +454,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         showError(problem);
       });
     };
-    const timer = setTimeout(save, 350);
+    const timer = setTimeout(save, 1500);
     const hidden = () => { if (document.visibilityState === "hidden") save(); };
     window.addEventListener("pagehide", save);
     document.addEventListener("visibilitychange", hidden);
@@ -444,16 +479,30 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   }, [search, preferencesReady]);
   const updateSettings = async (next: Preferences) => {
     const patch = Object.fromEntries(Object.entries(next).filter(([key,value]) => key !== "currentView" && key !== "productIdColumn" && JSON.stringify(value) !== JSON.stringify(meta?.settings[key as keyof Preferences]))) as Partial<Preferences>;
+    if (!Object.keys(patch).length) return next;
     const restored = await persistSettings(patch);
     setSettings(current => ({...current, ...Object.fromEntries(Object.keys(patch).map(key => [key, restored[key as keyof Preferences]]))}));
     return restored;
   };
+  const flushColumns = () => {
+    if (columnSaveTimer.current) clearTimeout(columnSaveTimer.current);
+    columnSaveTimer.current = null;
+    const patch = pendingColumns.current;
+    if (!patch) return settingsSaveQueue.current;
+    pendingColumns.current = null;
+    return persistSettings(patch);
+  };
+  useEffect(() => {
+    const flush = () => { void flushColumns().catch(showError); };
+    window.addEventListener("pagehide",flush);
+    return () => window.removeEventListener("pagehide",flush);
+  }, []);
   const changeColumns = (visibleColumns: string[]) => {
-    const next = {...settings, visibleColumns, columnSelectionVersion: 1};
-    setSettings(next);
-    // Serialize saves so rapid clicks cannot let an older selection win.
-    const job = persistSettings({visibleColumns, columnSelectionVersion: 1, knownCsvColumns: next.knownCsvColumns});
-    void job.catch(showError);
+    const patch = {visibleColumns,columnSelectionVersion:1};
+    setSettings(current=>({...current,...patch}));
+    pendingColumns.current = patch;
+    if (columnSaveTimer.current) clearTimeout(columnSaveTimer.current);
+    columnSaveTimer.current = setTimeout(()=>void flushColumns().catch(showError),1500);
   };
   const chooseView = (value: string) => {
     setView(value);
@@ -540,14 +589,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         start = end;
         setImportProgress(Math.round((start / prepared.rows.length) * 95));
       }
-      const data = await api<Metadata>(
+      await api(
         "imports/commit",
-        { id },
+        { id, sync: !!inventoryCacheScope() },
         controller.signal,
       );
-      setMeta(data);
-      setSettings(data.settings);
-      setFacets(await api("facets"));
+      await loadMetadata();
       setFile(null);
       setImportId(null);
       setSelected(new Set());
@@ -557,7 +604,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       setDirection("asc");
       setPage(1);
       setView("all");
-      setDataRevision(current => current + 1);
       setNotice(
         "Inventory saved." + (prepared.duplicateCount ? " " + prepared.duplicateCount.toLocaleString() + " duplicate entries removed; the first row for each Product ID was kept." : "") + " Sales history is pulled only when you request it.",
       );
@@ -611,6 +657,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         onlyStale: true,
         ...refreshOptions,
         approvedCost: plan?.maximumCredits,
+        planId: plan?.planId,
       });
       setRefresh({
         ...started,
@@ -663,21 +710,26 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setSaving(true);
     setError("");
     try {
-      const response = await apiFetch("/api/export", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          ...scopeQuery(exportScope),
-          analysis: exportAnalysis,
-        }),
-      });
-      if (!response.ok)
-        throw new Error(
-          ((await response.json()) as RecordValue).error ??
-            "Could not export inventory.",
-        );
-      const blob = await response.blob(),
-        url = URL.createObjectURL(blob),
+      let blob: Blob;
+      if (localEntries) {
+        blob = localExport(localEntries,scopeQuery(exportScope),meta?.headers ?? [],settings.staleHours,exportAnalysis);
+      } else {
+        const response = await apiFetch("/api/export", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            ...scopeQuery(exportScope),
+            analysis: exportAnalysis,
+          }),
+        });
+        if (!response.ok)
+          throw new Error(
+            ((await response.json()) as RecordValue).error ??
+              "Could not export inventory.",
+          );
+        blob = await response.blob();
+      }
+      const url = URL.createObjectURL(blob),
         anchor = document.createElement("a");
       anchor.href = url;
       anchor.download = exportAnalysis
@@ -693,6 +745,15 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     }
   };
   const openCard = async (row: RecordValue) => {
+    const entry = localEntries?.find(item=>item.row.key===row.key);
+    if (entry) {
+      const detail = Object.keys(entry.detail).length ? {
+        ...entry.detail,
+        notes:["Dates select reported "+(entry.detail.granularity==="daily" ? "daily" : "weekly")+" quantity totals."],
+      } : null;
+      setCard({card:{...entry.info,key:row.key},market:entry.market,detail,fetchedAt:row.fetchedAt,originals:[entry.raw,...(entry.originals ?? []).slice(0,19).map(item=>JSON.parse(item.raw))]});
+      return;
+    }
     setCardLoading(true);
     setCard({ card: row });
     try {
@@ -1708,7 +1769,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               disabled={saving || !settings.visibleColumns.length}
               onClick={() => {
                 setSaving(true);
-                void settingsSaveQueue.current
+                void flushColumns()
                   .then(() => setModal(null))
                   .catch(showError)
                   .finally(() => setSaving(false));

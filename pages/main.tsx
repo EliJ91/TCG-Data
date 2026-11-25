@@ -2,7 +2,8 @@ import {useEffect,useState} from "react";
 import {createRoot} from "react-dom/client";
 import Inventory from "../app/Inventory";
 import "../app/globals.css";
-import {sessionKey} from "../lib/client-api";
+import {inventoryCacheScope,sessionKey} from "../lib/client-api";
+import {clearInventoryCache} from "../lib/inventory-cache";
 const configured=String(import.meta.env.VITE_API_URL??"").replace(/\/$/,"");
 const backend=configured&&new URL(configured).protocol==="https:"?configured:import.meta.env.DEV?configured:"";
 window.__TCG_BACKEND__=backend;
@@ -25,7 +26,7 @@ function App(){
   return()=>window.removeEventListener("tcg-session-expired",expired);
  },[]);
  const login=async()=>{try{setBusy(true);const verifier=encode(crypto.getRandomValues(new Uint8Array(32)));const challenge=encode(new Uint8Array(await crypto.subtle.digest("SHA-256",new TextEncoder().encode(verifier))));sessionStorage.setItem("tcg-login-verifier",verifier);location.assign(backend+"/auth/login?challenge="+encodeURIComponent(challenge));}catch(e){setBusy(false);setError(e instanceof Error?e.message:"Sign-in failed.");}};
- if(signedIn&&backend)return <Inventory onSignOut={()=>{sessionStorage.removeItem(sessionKey);setSignedIn(false);}}/>;
+ if(signedIn&&backend)return <Inventory onSignOut={()=>{const scope=inventoryCacheScope();sessionStorage.removeItem(sessionKey);setSignedIn(false);if(scope)void clearInventoryCache(scope).catch(()=>{});}}/>;
  return <main className="signin"><div className="signin-card"><div className="wordmark">SortSwift <span>Market</span></div><h1>Your inventory. A clearer next move.</h1><p>Sign in with GitHub to open your private inventory. Your API key stays on the server.</p>{error&&<p role="alert" className="danger-text">{error}</p>}{!backend?<p className="muted">The private backend connection is being configured.</p>:<button className="button primary" disabled={busy} onClick={()=>void login()}>{busy?"Connecting…":"Sign in with GitHub"}</button>}<p className="small muted">Access is limited to the site owner. Signing in requests no repository access.</p></div></main>;
 }
 createRoot(document.getElementById("root")!).render(<App/>);

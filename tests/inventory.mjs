@@ -10,7 +10,7 @@ function moduleUrl(path,replacements={}) {
 }
 const sql=new DatabaseSync(":memory:");
 for(const name of readdirSync(new URL("../drizzle",import.meta.url)).filter(name=>name.endsWith(".sql")).sort())sql.exec(readFileSync(new URL("../drizzle/"+name,import.meta.url),"utf8"));
-function statement(query){let args=[];return {bind(...values){args=values;return this},async first(column){const row=sql.prepare(query).get(...args);return (column ? row?.[column] : row)??null},async all(){return {results:sql.prepare(query).all(...args)}},async run(){return this.sync()},sync(){return {meta:{changes:Number(sql.prepare(query).run(...args).changes)}}}};}
+function statement(query){let args=[];return {bind(...values){args=values;return this},async first(column){const row=sql.prepare(query).get(...args);return (column ? row?.[column] : row)??null},async all(){return {results:sql.prepare(query).all(...args)}},async run(){return this.sync()},sync(){const stmt=sql.prepare(query);return /^SELECT /.test(query) ? {results:stmt.all(...args)} : {meta:{changes:Number(stmt.run(...args).changes)}}}};}
 globalThis.inventoryTestEnv={DB:{prepare:statement,async batch(statements){sql.exec("BEGIN");try{const results=statements.map(s=>s.sync());sql.exec("COMMIT");return results}catch(e){sql.exec("ROLLBACK");throw e}}}};
 const domainUrl=moduleUrl("../lib/domain.ts"),csvUrl=moduleUrl("../lib/csv.ts",{"./domain":domainUrl});
 const csv=await import(csvUrl),domain=await import(domainUrl);
@@ -18,6 +18,10 @@ const dataUrl=moduleUrl("../lib/data.ts",{"cloudflare:workers":"data:text/javasc
 const data=await import(dataUrl);
 const adapterUrl=moduleUrl("../lib/api-sh.ts"),creditsUrl=moduleUrl("../lib/credits.ts",{"./data":dataUrl,"./api-sh":adapterUrl});
 const market=await import(moduleUrl("../lib/market.ts",{"./data":dataUrl,"./api-sh":adapterUrl,"./credits":creditsUrl}));
+const sync=await import(moduleUrl("../lib/inventory-sync.ts",{"./data":dataUrl}));
+const localUrl=moduleUrl("../lib/local-inventory.ts",{"./domain":domainUrl,"./csv":csvUrl});
+const local=await import(localUrl);
+const clientSync=await import(moduleUrl("../lib/inventory-cache.ts",{"./local-inventory":localUrl}));
 const owner="inventory-test";
 async function upload(text,mode="replace") {
  const prepared=csv.prepareImport(text,{productId:"Lookup"});
@@ -144,13 +148,14 @@ test("Only sales quantities can be charged and dates filter the saved history, i
    const path='/tcgplayer/v1/price-history?id=123&range=annual',fetchedAt=Date.now()-1000;
    sql.prepare("INSERT INTO api_cache(id,owner,fetched_at,data) VALUES (?,?,?,?)").run(owner+'|api-sh:'+path,owner,fetchedAt,JSON.stringify({body:history(123),requestId:'cached',fetchedAt,path}));
    const input={onlyStale:true,range:'annual',includePricing:true,includeListings:true,maxProducts:100};
-   const plan=await market.refreshPlan(owner,input);
+   const plan=await market.prepareRefreshPlan(owner,input);
    assert.equal(plan.groups,2);assert.equal(plan.maximumCredits,1);assert.equal(paid.length,0);
    assert.equal(plan.options.range,'annual');assert.equal(plan.options.includePricing,false);assert.equal(plan.options.includeListings,false);
-   const started=await market.startRefresh(owner,{...input,approvedCost:1});
+   const started=await market.startRefresh(owner,{...input,approvedCost:1,planId:plan.planId});
    sql.prepare("UPDATE refresh_runs SET detail=json_set(detail,'$.options.range','annual','$.options.includePricing',1,'$.options.includeListings',1) WHERE id=?").run(started.id);
    for(const key of started.keys){const result=await market.refreshStep(owner,started.id,key);assert.equal(result.error,undefined);}
    assert.equal(paid.length,1);assert(paid[0].includes('id=456'));
+   await assert.rejects(()=>market.startRefresh(owner,{...input,approvedCost:1,planId:plan.planId}),{status:409});
    assert((await data.queryCards(owner,{})).rows.every(row=>row.granularity==='weekly'));
    assert.equal((await market.refreshPlan(owner,input)).groups,0);
    const before=paid.length;
@@ -270,4 +275,56 @@ test("Sales planning accounts for D1 row reads and pauses while inventory browsi
   db.prepare = prepare;
   sql.prepare("DELETE FROM refresh_read_budget WHERE day=?").run(day);
  }
+});
+
+test("Warm sync transfers only changed inventory rows and marketplace events", async () => {
+ const requests = [];
+ const api = route => {
+  const [name,search] = route.split("?");
+  const params = new URLSearchParams(search);
+  requests.push(name);
+  if (name === "sync/meta") return sync.syncMetadata(owner,params.get("version"));
+  if (name === "sync/inventory") return sync.syncInventory(owner,params);
+  if (name === "sync/changes") return sync.syncChanges(owner,params);
+  throw Error("Unexpected route");
+ };
+ const initial = await upload("Lookup,Custom\n11,first\n22,other\n33,third");
+ const baseline = await clientSync.synchronizeInventory(api,"test",null);
+ assert.equal(baseline.cards.length,3);
+ assert.deepEqual(requests.splice(0),["sync/meta","sync/inventory"]);
+ const unchanged = await clientSync.synchronizeInventory(api,"test",baseline);
+ assert.strictEqual(unchanged.cards,baseline.cards);
+ assert.deepEqual(requests.splice(0),["sync/meta"]);
+ await upload("Lookup,Custom\n22,revised","update");
+ await upload("Lookup,Custom\n44,new","update");
+ const meta=await sync.syncMetadata(owner,baseline.meta.version);
+ assert.equal(meta.uploaded,2);
+ const changed=await sync.syncInventory(owner,new URLSearchParams({version:meta.version,uploaded:String(meta.uploaded)}));
+ assert.deepEqual(changed.rows.map(row=>JSON.parse(row.info).productId),["44","22"]);
+ const patch=await clientSync.synchronizeInventory(api,"test",unchanged);
+ assert.equal(patch.cards.length,4);
+ assert.deepEqual(requests.splice(0),["sync/meta","sync/inventory"]);
+ const server=await data.queryCards(owner,{sort:"rowNo",direction:"asc"});
+ const browser=local.queryLocalInventory(local.indexInventory(patch.cards),{sort:"rowNo",direction:"asc"},24);
+ assert.deepEqual(browser.rows.map(row=>[row.key,row.rowNo,row["csv:Custom"]]),server.rows.map(row=>[row.key,row.rowNo,row["csv:Custom"]]));
+ const key=patch.cards.find(row=>JSON.parse(row.info).productId==="22").key;
+ sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET data=excluded.data,detail=excluded.detail,fetched_at=excluded.fetched_at")
+   .run(owner+"|"+key,owner,key,"22",1,JSON.stringify({available:true,analyzed:true,unitsSold:8}),JSON.stringify({history:[{date:Date.UTC(2026,0,8),units:8}]}));
+ sql.prepare("INSERT INTO api_cache(id,owner,fetched_at,data) VALUES (?,?,?,?)").run(owner+"|sku-map:770",owner,Date.now(),'{"productId":"22"}');
+ const next=await clientSync.synchronizeInventory(api,"test",patch);
+ assert.deepEqual(requests.splice(0),["sync/meta","sync/changes"]);
+ assert.equal(next.cards.filter(row=>row===patch.cards.find(old=>old.key===row.key)).length,3);
+ const delta=await sync.syncChanges(owner,new URLSearchParams({after:String(patch.meta.sequence),through:String(next.meta.sequence)}));
+ assert.equal(delta.rows.find(row=>row.kind==="sku").subject,"770");
+ assert.equal(JSON.parse(next.cards.find(row=>row.key===key).data).unitsSold,8);
+ const input={filters:{...domain.emptyFilters,dateFrom:"2026-01-08",dateTo:"2026-01-08",search:"revised",numeric:[{field:"unitsSold",min:"8",max:"8"}]},sort:"unitsSold",direction:"desc"};
+ const entries=local.indexInventory(next.cards);
+ const localRows=local.queryLocalInventory(entries,input,24).rows;
+ const serverRows=(await data.queryCards(owner,input)).rows;
+ assert.deepEqual(localRows.map(row=>[row.key,row.unitsSold]),serverRows.map(row=>[row.key,row.unitsSold]));
+ const originalCsv=csv.parseCSV(await (await data.exportInventory(owner,{})).text());
+ const cachedCsv=csv.parseCSV(await local.localExport(entries,{},initial.headers,24,false).text());
+ assert.deepEqual(cachedCsv,originalCsv);
+ await sync.limitOperation(owner,"test-window",1,60000);
+ await assert.rejects(()=>sync.limitOperation(owner,"test-window",1,60000),{status:429});
 });

@@ -1,6 +1,6 @@
 import {env} from "cloudflare:workers";
 import {handleApi} from "../lib/http-api";
-import {schema,refreshReadSchema} from "./generated/schema";
+import {schema,refreshReadSchema,inventorySyncSchema} from "./generated/schema";
 import {allowedOrigin,authenticatedOwner,challengeFor,oauthCookie,randomCode,readOauthCookie,sign,verify} from "./auth";
 let schemaReady=false;
 async function ensureSchema(){
@@ -9,11 +9,11 @@ async function ensureSchema(){
  if(!db)throw new Error("Database binding is missing.");
  // Cache only completed state. Pending D1 work belongs to the current request
  // and must never be shared with a later request if this one ends early.
- const existing=await db.prepare("SELECT name FROM sqlite_master WHERE name IN ('auth_codes','refresh_owner_started') ORDER BY name DESC LIMIT 1").first<{name:string}>();
- if(existing?.name!=="refresh_owner_started"){
+ const existing=await db.prepare("SELECT name FROM sqlite_master WHERE name IN ('auth_codes','refresh_owner_started','resource_windows') ORDER BY name DESC LIMIT 1").first<{name:string}>();
+ if(existing?.name!=="resource_windows"){
   // Initialize new databases or upgrade existing ones atomically. The final
   // index marks completion. IF NOT EXISTS handles concurrent cold starts.
-  const pending=existing ? refreshReadSchema : schema;
+  const pending = !existing ? schema : existing.name === "auth_codes" ? [...refreshReadSchema,...inventorySyncSchema] : inventorySyncSchema;
   await db.batch(pending.map(sql=>db.prepare(sql.replace(/^CREATE (TABLE|(?:UNIQUE )?INDEX) (?!IF NOT EXISTS )/i,"CREATE $1 IF NOT EXISTS "))));
  }
  schemaReady=true;

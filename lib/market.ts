@@ -3,7 +3,7 @@ import { API_SH_BASE, DAY, normalizeMarket, salesHistoryPath, salesOnlyResponse,
 import { reserveCredits, settleCredits, syncAccount, freeGet } from "./credits";
 export { normalizeMarket } from "./api-sh";
 type Json=Record<string,any>;
-type RefreshInput=QueryInput & {onlyStale?:boolean;range?:HistoryRange;includePricing?:boolean;includeListings?:boolean;prioritizeUnanalyzed?:boolean;maxProducts?:number;approvedCost?:number};
+type RefreshInput=QueryInput & {onlyStale?:boolean;range?:HistoryRange;includePricing?:boolean;includeListings?:boolean;prioritizeUnanalyzed?:boolean;maxProducts?:number;approvedCost?:number;planId?:string};
 async function cache(owner:string,path:string) { return database().prepare("SELECT data,fetched_at FROM api_cache WHERE id=? AND owner=?").bind(owner+"|api-sh:"+path,owner).first<{data:string;fetched_at:number}>(); }
 async function saveCache(owner:string,path:string,body:Json) { await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data").bind(owner+"|api-sh:"+path,owner,Date.now(),JSON.stringify(body)).run(); }
 async function activeRun(owner:string,id:string) { const row=await database().prepare("SELECT * FROM refresh_runs WHERE owner=? AND id=?").bind(owner,id).first<Json>(); if(!row||row.status!=="running") throw new AppError("Refresh cancelled or already finished.",409); return row; }
@@ -26,7 +26,6 @@ export async function provider(owner:string,runId:string,key:string,path:string,
   if(!response?.ok || body.success===false || body.error) throw new AppError("API.SH could not return this product (HTTP "+(response?.status??"timeout")+"). Previous data is preserved.",response?.status===401||response?.status===402||response?.status===403?403:response?.status===429?429:502);
   const stored={body:salesOnlyResponse(body),requestId:charge.requestId,fetchedAt:Date.now(),path};
   await saveCache(owner,path,stored);
-  await saveCache(owner,"archive:"+(charge.requestId??reservation.id),stored);
   return stored;
 }
 export async function refreshPlan(owner:string,input:RefreshInput) {
@@ -57,25 +56,46 @@ export async function refreshPlan(owner:string,input:RefreshInput) {
     chosen.push(group);budget-=needed;cost+=needed;
   }
   const deferred=groups.length-chosen.length;
-  return {keys:chosen.map(r=>r.key),cards:targets.length,groups:chosen.length,eligibleProducts:groups.length,deferredProducts:deferred,unresolved:new Set(targets.filter(r=>!r.productId).map(r=>r.skuId||r.key)).size,minimumCredits:cost,maximumCredits:cost,minimumRequests:cost,maximumRequests:cost,options,account,accountError,note:"Sales history only. One credit per unique Product ID. Fresh saved results cost no credits."+(deferred?" "+deferred+" products remain for a later pull within your free credit balance and product limit.":"")};
+  return {version:space.active_version,keys:chosen.map(r=>r.key),cards:targets.length,groups:chosen.length,eligibleProducts:groups.length,deferredProducts:deferred,unresolved:new Set(targets.filter(r=>!r.productId).map(r=>r.skuId||r.key)).size,minimumCredits:cost,maximumCredits:cost,minimumRequests:cost,maximumRequests:cost,options,account,accountError,note:"Sales history only. One credit per unique Product ID. Fresh saved results cost no credits."+(deferred?" "+deferred+" products remain for a later pull within your free credit balance and product limit.":"")};
 }
+export async function prepareRefreshPlan(owner: string, input: RefreshInput) {
+  const plan = await refreshPlan(owner,input);
+  if (!plan.groups) return plan;
+  const planId = crypto.randomUUID();
+  await saveCache(owner,"refresh-preview",{planId,expires:Date.now()+300_000,plan});
+  return {...plan,planId};
+}
+
 export async function startRefresh(owner:string,input:RefreshInput) {
   const space=await workspace(owner);await apiKey(space);
   if(space.import_lock) throw new AppError("Wait for the CSV import to finish.",409);
-  const plan=await refreshPlan(owner,input);
+  let plan: Awaited<ReturnType<typeof refreshPlan>>;
+  if (input.planId) {
+    const cached = await cache(owner,"refresh-preview");
+    const preview = cached ? JSON.parse(cached.data) : null;
+    if (preview?.planId !== input.planId || preview.expires<=Date.now() || preview.plan.version!==space.active_version)
+      throw new AppError("The estimate expired or inventory changed. Open the sales-history estimate again.",409);
+    plan = preview.plan;
+  } else plan = await refreshPlan(owner,input);
   if(!plan.groups) throw new AppError(plan.accountError||"No products can be refreshed with the available free credits. Add Product IDs for unresolved cards.",409);
   if(input.approvedCost===undefined || plan.maximumCredits>input.approvedCost) throw new AppError("The estimate changed. Review the credit cost before refreshing.",409);
   const id=crypto.randomUUID(),{keys,...summary}=plan;
-  const created=await database().prepare("INSERT INTO refresh_runs (id,owner,status,started_at,total,detail) SELECT ?,?,'running',?,?,? FROM workspaces WHERE owner=? AND import_lock IS NULL AND active_version=? AND NOT EXISTS (SELECT 1 FROM refresh_runs WHERE owner=? AND status='running')").bind(id,owner,Date.now(),plan.groups,JSON.stringify({...summary,requests:0,failedRequests:0}),owner,space.active_version,owner).run();
+  const db = database();
+  const updates = [db.prepare("INSERT INTO refresh_runs (id,owner,status,started_at,total,detail) SELECT ?,?,'running',?,?,? FROM workspaces WHERE owner=? AND import_lock IS NULL AND active_version=? AND NOT EXISTS (SELECT 1 FROM refresh_runs WHERE owner=? AND status='running')").bind(id,owner,Date.now(),plan.groups,JSON.stringify({...summary,requests:0,failedRequests:0}),owner,space.active_version,owner),
+    db.prepare("INSERT INTO refresh_targets (id,owner,run_id,card_key) SELECT ?||'|'||value,?,?,value FROM json_each(?) WHERE changes()=1").bind(id,owner,id,JSON.stringify(keys)),
+  ];
+  if (input.planId) updates.push(db.prepare(
+    "DELETE FROM api_cache WHERE id=? AND owner=? AND json_extract(data,'$.planId')=? AND EXISTS (SELECT 1 FROM refresh_runs WHERE id=? AND owner=?)"
+  ).bind(owner+"|api-sh:refresh-preview",owner,input.planId,id,owner));
+  const [created] = await db.batch(updates);
   if(!created.meta.changes) throw new AppError("A refresh or import is already active.",409);
-  await database().prepare("INSERT INTO refresh_targets (id,owner,run_id,card_key) SELECT ?||'|'||value,?,?,value FROM json_each(?)").bind(id,owner,id,JSON.stringify(keys)).run();
   return {id,...plan};
 }
 export async function cancelRefresh(owner:string,id:string) { await database().prepare("UPDATE refresh_runs SET status='cancelled' WHERE owner=? AND id=? AND status='running'").bind(owner,id).run();return {cancelled:true}; }
 async function applyHistory(owner:string,productId:string,history:Json,extras:Json,sources:Json,issues:string[]=[],fetchedAt=Date.now()) {
   if(String(history.product_id)!==productId||!Array.isArray(history.series)) throw new AppError("API.SH returned an unexpected product. Previous data is preserved.",502);
   const space=await workspace(owner),skuIds=[...new Set<string>(history.series.flatMap((s:Json|null) => s && /^\d+$/.test(String(s.sku)) ? [String(s.sku)] : []))];
-  for(const sku of skuIds) await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data").bind(owner+"|sku-map:"+sku,owner,Date.now(),JSON.stringify({productId,verified:true})).run();
+  for(const sku of skuIds) await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data WHERE api_cache.data IS NOT excluded.data").bind(owner+"|sku-map:"+sku,owner,Date.now(),JSON.stringify({productId,verified:true})).run();
   const version = space.active_version ?? "";
   // Each branch looks up matching keys through its own index. An OR across
   // cards and market made SQLite read the entire inventory for every product.
@@ -92,7 +112,7 @@ async function applyHistory(owner:string,productId:string,history:Json,extras:Js
     .all<Json>();
   for(const row of inventory.results) {
     const previous=await database().prepare("SELECT data,detail,fetched_at FROM market WHERE owner=? AND card_key=?").bind(owner,row.card_key).first<Json>();
-    if(previous && previous.fetched_at>fetchedAt && JSON.parse(previous.data).historyRange==="annual")continue;
+    if(previous && previous.fetched_at>=fetchedAt && JSON.parse(previous.data).historyRange==="annual" && JSON.parse(previous.data).analyzed)continue;
     const normalized=normalizeMarket({...JSON.parse(row.info),quantity:row.quantity},history,extras,fetchedAt);
     if(!normalized.metrics.available && previous && JSON.parse(previous.data).available)continue;
     normalized.metrics.partial=issues.length>0;
@@ -151,6 +171,6 @@ export async function linkProduct(owner:string,cardKey:string,productId:string) 
   const space=await workspace(owner),row=await database().prepare("SELECT info FROM cards WHERE owner=? AND version=? AND card_key=?").bind(owner,space.active_version??"",cardKey).first<Json>();
   if(!row)throw new AppError("Card not found.",404);
   const info=JSON.parse(row.info);if(!info.skuId)throw new AppError("This row already has an imported Product ID. Update it through your CSV.");
-  await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data").bind(owner+"|sku-map:"+info.skuId,owner,Date.now(),JSON.stringify({productId,userProvided:true})).run();
+  await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data WHERE api_cache.data IS NOT excluded.data").bind(owner+"|sku-map:"+info.skuId,owner,Date.now(),JSON.stringify({productId,userProvided:true})).run();
   return {saved:true};
 }

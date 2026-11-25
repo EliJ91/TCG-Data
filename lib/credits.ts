@@ -35,7 +35,6 @@ export async function accountDetails(owner: string) {
   const snapshot=await syncAccount(owner),key=await apiKey(await workspace(owner));
   const results=await Promise.allSettled([freeGet(key,"/v1/account/usage"),freeGet(key,"/v1/account/logs")]);
   const report={snapshot,usage:results[0].status==="fulfilled"?results[0].value:null,logs:results[1].status==="fulfilled"?results[1].value:null,errors:results.flatMap(r=>r.status==="rejected"?[String(r.reason?.message??r.reason)]:[])};
-  await database().prepare("INSERT INTO api_cache (id,owner,fetched_at,data) VALUES (?,?,?,?) ON CONFLICT(id) DO UPDATE SET fetched_at=excluded.fetched_at,data=excluded.data").bind(owner+"|api-sh:account-details",owner,Date.now(),JSON.stringify(report)).run();
   const requests=await database().prepare("SELECT id,path,created_at,reserved,charged,status,request_id,metadata FROM api_requests WHERE owner=? ORDER BY created_at DESC LIMIT 50").bind(owner).all();
   return {...report,requests:requests.results};
 }
