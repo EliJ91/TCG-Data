@@ -42,7 +42,7 @@ D1 Free limits include 5 million rows read and 100,000 rows written per UTC day,
 
 - `npm run build:backend` generates the schema bootstrap from migrations and builds the standalone Worker.
 - `npm run build:pages` builds `dist/pages`. Set `VITE_API_URL` to the backend URL only.
-- `npx tsc --noEmit` and `node --test tests/core.mjs tests/inventory.mjs tests/credits.mjs tests/auth.mjs tests/cloudflare-auth.mjs` validate imports, column persistence, exports, credits, authentication, and data normalization.
+- `npx tsc --noEmit` and `node --test tests/core.mjs tests/inventory.mjs tests/credits.mjs tests/auth.mjs tests/cloudflare-auth.mjs tests/cloudflare-lifecycle.mjs` validate imports, column persistence, exports, credits, authentication, request isolation, and data normalization.
 - `npm run dev:pages` opens the local static frontend on port 5188.
 - `wrangler dev --config cloudflare/wrangler.jsonc --local` runs a separate local backend. Local `.dev.vars` files are ignored by Git.
 - `TEST_BACKEND=cloudflare TEST_ORIGIN=http://127.0.0.1:8787 node tests/api-smoke.mjs` checks large imports against the local backend only. It refuses production hosts and non-test inventories.

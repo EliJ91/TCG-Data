@@ -2,16 +2,20 @@ import {env} from "cloudflare:workers";
 import {handleApi} from "../lib/http-api";
 import {schema} from "./generated/schema";
 import {allowedOrigin,authenticatedOwner,challengeFor,oauthCookie,randomCode,readOauthCookie,sign,verify} from "./auth";
-let ready:Promise<void>|undefined;
+let schemaReady=false;
 async function ensureSchema(){
- if(!env.DB)throw new Error("Database binding is missing.");
- if(!ready)ready=(async()=>{
-  const existing=await env.DB!.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='auth_codes'").first();
-  if(existing)return;
-  // New, dedicated database only. The completion table is created last, atomically.
-  await env.DB!.batch(schema.map(sql=>env.DB!.prepare(sql)));
- })().catch(error=>{ready=undefined;throw error;});
- return ready;
+ if(schemaReady)return;
+ const db=env.DB;
+ if(!db)throw new Error("Database binding is missing.");
+ // Cache only completed state. Pending D1 work belongs to the current request
+ // and must never be shared with a later request if this one ends early.
+ const existing=await db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='auth_codes'").first();
+ if(!existing){
+  // Concurrent cold starts can each initialize safely. The completion table
+  // is still created last, in the same atomic batch as the rest of the schema.
+  await db.batch(schema.map(sql=>db.prepare(sql.replace(/^CREATE (TABLE|(?:UNIQUE )?INDEX) (?!IF NOT EXISTS )/i,"CREATE $1 IF NOT EXISTS "))));
+ }
+ schemaReady=true;
 }
 function redirect(url:string,cookie?:string){const headers=new Headers({Location:url,"Cache-Control":"no-store","Referrer-Policy":"no-referrer"});if(cookie)headers.set("Set-Cookie",cookie);return new Response(null,{status:303,headers});}
 function error(message:string,status=400){return Response.json({error:message},{status,headers:{"Cache-Control":"no-store"}});}
