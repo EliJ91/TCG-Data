@@ -565,12 +565,12 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
     const dates = [from !== null ? "json_extract(h.value,'$.date')>="+from : "1", to !== null ? "json_extract(h.value,'$.date')<"+(to+86400000) : "1"].join(" AND ");
     e.unitsSold = "(SELECT CASE WHEN COUNT(*)=0 OR SUM(CASE WHEN json_extract(h.value,'$.units') IS NULL OR json_extract(h.value,'$.units')<0 THEN 1 ELSE 0 END)>0 THEN NULL ELSE SUM(json_extract(h.value,'$.units')) END FROM json_each(m.detail,'$.history') h WHERE "+dates+")";
   }
-  const start = from ?? e.historyFrom, end = to ?? e.historyTo;
-  e.avgDailySold = `CASE WHEN ${end}>=${start} THEN 1.0*(${e.unitsSold})/((${end}-${start})/86400000.0+1) END`;
+  const hasDateRange = from !== null && to !== null;
+  e.avgDailySold = hasDateRange ? `CAST(1.0*(${e.unitsSold})/(${(to-from)/86_400_000+1}) AS INTEGER)` : "NULL";
 
   const values: unknown[] = [owner, space.active_version ?? ""],
     where = ["c.owner=?", "c.version=?"];
-  if (Array.isArray(input.displayColumns)) {
+  if (Array.isArray(input.displayColumns) && (hasDateRange || !input.displayColumns.includes("avgDailySold"))) {
     const displayed = [...new Set(input.displayColumns)].filter(key=>key!=="rowNo" && Object.hasOwn(e,key));
     const hasValue = (expression: string) =>
       "UPPER(COALESCE(TRIM(CAST("+expression+" AS TEXT),"+sqlWhitespace+"),'')) NOT IN ('','N/A')";

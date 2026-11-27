@@ -546,17 +546,19 @@ test("Avg. Daily Sold uses the selected dates and agrees across the table and ex
  };
  assert(domain.inventoryColumns(initial.headers).some(column=>column.label==="Avg. Daily Sold"));
  assert(!initial.settings.visibleColumns.includes("avgDailySold"));
- assert.notEqual(domain.formatValue(0.125,"decimal"),domain.formatValue(0,"decimal"));
- await both(input,[["87101",2.1],["87102",0],["87103",null],["87104",null]]);
+ await both(input,[["87101",2],["87102",0],["87103",null],["87104",null]]);
  await both({...input,filters:dateRange("2026-01-08","2026-01-08")},[["87101",7],["87102",0],["87103",null],["87104",null]]);
- await both({...input,filters:dateRange("","")},[["87101",2.625],["87102",0],["87103",null],["87104",null]]);
- await both({...input,filters:{...dateRange("","2026-01-04"),numeric:[{field:"avgDailySold",min:"3",max:"4"}]}},[["87101",3.5]]);
+ const noAverage = [["87101",null],["87102",null],["87103",null],["87104",null]];
+ await both({...input,filters:dateRange("",""),displayColumns:["avgDailySold"]},noAverage);
+ await both({...input,filters:dateRange("","2026-01-04")},noAverage);
+ await both({...input,filters:dateRange("2026-01-04","")},noAverage);
+ await both({...input,filters:{...input.filters,numeric:[{field:"avgDailySold",min:"2",max:"2"}]}},[["87101",2]]);
  await both({...input,filters:dateRange("2026-01-02","2026-01-03")},[["87101",null],["87102",null],["87103",null],["87104",null]]);
  const analysis = await local.localExport(entries,input,meta.headers,24,true).text();
  assert.deepEqual(csv.parseCSV(analysis),csv.parseCSV(await (await data.exportInventory(owner,{...input,analysis:true})).text()));
  const parsed = csv.parseCSV(analysis);
  const avg = parsed.headers.indexOf("Avg. Daily Sold");
- assert.deepEqual(parsed.records.map(row=>row[avg]),["2.1","0","",""]);
+ assert.deepEqual(parsed.records.map(row=>row[avg]),["2","0","",""]);
  assert.deepEqual(csv.parseCSV(await local.localExport(entries,input,meta.headers,24,false).text()).headers,["Lookup","Name"]);
 });
 

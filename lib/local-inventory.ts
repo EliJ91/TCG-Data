@@ -79,9 +79,8 @@ function rowWithSalesWindow({row,detail}: Entry, from: number|null, to: number|n
   const unitsSold = from !== null || to !== null ? reportedUnits(history,from,to) : row.unitsSold ?? reportedUnits(history,null,null);
   const historyFrom = row.historyFrom ?? history[0]?.date ?? null;
   const historyTo = row.historyTo ?? history.at(-1)?.date ?? null;
-  const start = from ?? historyFrom, end = to ?? historyTo;
-  const avgDailySold = unitsSold != null && start != null && end != null && end >= start
-    ? unitsSold / ((end - start) / DAY_MS + 1) : null;
+  const avgDailySold = unitsSold != null && from !== null && to !== null && to >= from
+    ? Math.floor(unitsSold / ((to - from) / DAY_MS + 1)) : null;
   return {...row,unitsSold,historyFrom,historyTo,avgDailySold};
 }
 
@@ -101,6 +100,7 @@ function selectRows(entries: Entry[], input: Input, staleHours: number) {
   const from = f?.dateFrom ? Date.parse(f.dateFrom) : null, to = f?.dateTo ? Date.parse(f.dateTo) : null;
   if ((from !== null && !Number.isFinite(from)) || (to !== null && !Number.isFinite(to)) || (from !== null && to !== null && from > to))
     throw new Error("Choose a valid sales date range with the start before the end.");
+  const showsDatePrompt = (from === null || to === null) && input.displayColumns?.includes("avgDailySold");
   const selected = input.selected?.length ? new Set(input.selected) : null;
   const categories = Object.entries(f?.categories ?? {}).flatMap(([key,values])=>{
     const known = columns.some(column=>column.key===key) ||
@@ -131,7 +131,7 @@ function selectRows(entries: Entry[], input: Input, staleHours: number) {
         f?.freshness === "fresh" && (row.fetchedAt == null || row.fetchedAt < freshAfter || !!market.partial) ||
         f?.freshness === "outdated" && !(row.fetchedAt != null && row.fetchedAt < freshAfter || market.partial)) continue;
     const projected = rowWithSalesWindow(entry,from,to);
-    if (input.displayColumns?.length && !input.displayColumns.some(key=>hasDisplayValue(projected[key]))) continue;
+    if (input.displayColumns?.length && !showsDatePrompt && !input.displayColumns.some(key=>hasDisplayValue(projected[key]))) continue;
     if (salesCategories.some(([key,values])=>!values.has(projected[key]))) continue;
     if (ranges.some(({field,min,max}) => {
       const value = numericFilterValue(projected[field]);

@@ -1084,10 +1084,8 @@ tbody tr:last-child td {
 }
 .column-grip:active { cursor: grabbing; }
 .column-option.dragging { opacity: .5; }
-.column-option.drop-target {
-  outline: 2px solid var(--green);
-  outline-offset: -2px;
-}
+.column-option.insert-before { box-shadow: inset 0 2px var(--green); }
+.column-option.insert-after { box-shadow: inset 0 -2px var(--green); }
 .file-summary {
   display: flex;
   align-items: center;

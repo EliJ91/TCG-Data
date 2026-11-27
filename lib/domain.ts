@@ -130,7 +130,7 @@ export function normalizeView(value: Partial<ViewPreferences> = {}): ViewPrefere
 export type Column = {
   key: string;
   label: string;
-  kind: "text" | "number" | "decimal" | "date" | "salesDate";
+  kind: "text" | "number" | "date" | "salesDate";
   note?: string;
 };
 export const columns: Column[] = [
@@ -145,7 +145,7 @@ export const columns: Column[] = [
   { key: "language", label: "Language", kind: "text" },
   { key: "quantity", label: "Owned", kind: "number" },
   {key: "unitsSold", label: "Units sold", kind: "number", note: "Reported quantities in the selected sales dates. Weekly totals are not split into individual days."},
-  {key: "avgDailySold", label: "Avg. Daily Sold", kind: "decimal", note: "Units sold divided by the number of calendar days, including both dates. Unset dates use this product’s saved history dates."},
+  {key: "avgDailySold", label: "Avg. Daily Sold", kind: "number", note: "Units sold divided by the calendar days in the selected range, including both dates, rounded down."},
   {key: "scope", label: "Sales coverage", kind: "text"},
   {key: "historyFrom", label: "History starts", kind: "salesDate"},
   {key: "historyTo", label: "History ends", kind: "salesDate"},
@@ -228,7 +228,6 @@ export function formatValue(value: unknown, kind: Column["kind"]) {
       timeZone: kind === "salesDate" ? "UTC" : undefined,
     });
   if (kind === "number") return Number(value).toLocaleString(undefined, {maximumFractionDigits: 0});
-  if (kind === "decimal") return Number(value).toLocaleString(undefined, {maximumFractionDigits: 3});
   return String(value);
 }
 export const normalizeLabel = (value: string) =>

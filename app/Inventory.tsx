@@ -373,6 +373,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   latest.current = { filters, sort, direction, meta };
   const hasInventory = !!meta?.filename;
   const columns = inventoryColumns(meta?.headers ?? []);
+  const averagePrompt = !filters.dateFrom || !filters.dateTo ? "Choose Date Range" : "";
   const nameHeader = meta?.headers.find(header => csvInfoField(meta.headers,header) === "name");
   const csvNameKey = nameHeader ? csvColumnKey(nameHeader) : null;
   const selectedCardRow = result.rows.find(row => row.key === card?.card?.key);
@@ -932,12 +933,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       setCardLoading(false);
     }
   };
-  const swapColumns = (from: string, to: string) => {
+  const moveColumn = (from: string, to: string) => {
     if (from === to || !visible.some(column => column.key === from) || !visible.some(column => column.key === to)) return;
     const list = [...settings.visibleColumns],
       index = list.indexOf(from),
       target = list.indexOf(to);
-    [list[index], list[target]] = [list[target], list[index]];
+    list.splice(index, 1);
+    list.splice(target, 0, from);
     changeColumns(list);
   };
   const finishColumnDrag = () => {touchDrag.current = null;setDragColumn(null);setDropColumn(null);};
@@ -1504,7 +1506,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                                 row[column.key] != null
                                   ? "≥"
                                   : ""}
-                                {!row.analyzed && row[column.key] == null && salesColumnKeys.has(column.key) ? "No Data" : (
+                                {column.key === "avgDailySold" && averagePrompt ? averagePrompt :
+                                  !row.analyzed && row[column.key] == null && salesColumnKeys.has(column.key) ? "No Data" : (
                                   <InventoryCell
                                     value={row[column.key]}
                                     column={column}
@@ -1869,7 +1872,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         >
           <div className="modal-body">
             <p className="muted small">
-              Drag the grip to swap columns. The top column appears farthest left in the table. Your choices save automatically for your next visit and CSV upload.
+              Drag the grip to move a column into its new position. The top column appears farthest left in the table. Your choices save automatically for your next visit and CSV upload.
             </p>
             <div className="column-list">
               {[
@@ -1880,16 +1883,19 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               ].filter(key => columns.some(column => column.key === key)).map((key) => {
                 const column = columns.find((item) => item.key === key)!;
                 const shown = settings.visibleColumns.includes(key);
+                const insertEdge = dragColumn && dragColumn !== key && dropColumn === key
+                  ? settings.visibleColumns.indexOf(dragColumn) > settings.visibleColumns.indexOf(key) ? " insert-before" : " insert-after"
+                  : "";
                 return (
                   <div
                     key={key}
                     data-column-key={key}
-                    className={"column-option" + (shown ? " visible" : "") + (dragColumn === key ? " dragging" : "") + (dropColumn === key && dragColumn !== key ? " drop-target" : "")}
+                    className={"column-option" + (shown ? " visible" : "") + (dragColumn === key ? " dragging" : "") + insertEdge}
                   >
                     <button
                       className="column-grip"
                       aria-label={"Drag to reorder " + column.label}
-                      title="Drag to swap columns. Keyboard: use the up and down arrow keys."
+                      title="Drag to reorder columns. Use the up and down arrow keys to move a column with the keyboard."
                       disabled={!shown}
                       onPointerDown={event => {
                         if (!shown) return;
@@ -1907,7 +1913,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                       onPointerUp={event => {
                         if (!touchDrag.current) return;
                         const target = columnAt(event.clientX, event.clientY);
-                        if (target) swapColumns(touchDrag.current, target);
+                        if (target) moveColumn(touchDrag.current, target);
                         finishColumnDrag();
                         if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
                       }}
@@ -1916,7 +1922,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                         if (!["ArrowUp", "ArrowDown"].includes(event.key)) return;
                         event.preventDefault();
                         const index = visible.findIndex(column => column.key === key), target = visible[index + (event.key === "ArrowUp" ? -1 : 1)];
-                        if (target) swapColumns(key, target.key);
+                        if (target) moveColumn(key, target.key);
                       }}
                     ><GripVertical size={17} /></button>
                     <label>
@@ -2253,7 +2259,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                           (selectedCardRow ? selectedCardRow[column.key] : card.market?.[column.key]) != null
                             ? "≥"
                             : ""}
-                          {!card.market?.analyzed && !card.market?.available ? "No Data" : formatValue(
+                          {column.key === "avgDailySold" && averagePrompt ? averagePrompt :
+                            !card.market?.analyzed && !card.market?.available ? "No Data" : formatValue(
                             selectedCardRow ? selectedCardRow[column.key] : card.market?.[column.key],
                             column.kind,
                           )}
