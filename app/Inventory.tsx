@@ -42,9 +42,10 @@ import {
   type Filters,
   type ImportRow,
 } from "../lib/domain";
-import { type Mapping } from "../lib/csv";
+import { csvInfoField, type Mapping } from "../lib/csv";
 import ImportWorker from "../lib/import.worker?worker";
 import InventoryCell from "./InventoryCell";
+import CardNameLink from "./CardNameLink";
 import { readInventoryCache, synchronizeInventory } from "../lib/inventory-cache";
 import { describeInventory, indexInventory, inventoryFacets, localExport, queryLocalInventory, type InventorySnapshot } from "../lib/local-inventory";
 
@@ -118,7 +119,7 @@ function Modal({
   wide = false,
   error,
 }: {
-  title: string;
+  title: ReactNode;
   children: ReactNode;
   onClose: () => void;
   wide?: boolean;
@@ -372,6 +373,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   latest.current = { filters, sort, direction, meta };
   const hasInventory = !!meta?.filename;
   const columns = inventoryColumns(meta?.headers ?? []);
+  const nameHeader = meta?.headers.find(header => csvInfoField(meta.headers,header) === "name");
+  const csvNameKey = nameHeader ? csvColumnKey(nameHeader) : null;
   const selectedCardRow = result.rows.find(row => row.key === card?.card?.key);
   const hasFilters =
     !!filters.search ||
@@ -1483,12 +1486,14 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                           >
                             {column.key === "name" ? (
                               <div className="card-name">
-                                <strong>{row.name}</strong>
+                                <strong><CardNameLink productId={row.productId}>{row.name}</CardNameLink></strong>
                                 <span>
                                   {row.number ? row.number + " · " : ""}
                                   {row.language || "Language not specified"}
                                 </span>
                               </div>
+                            ) : column.key === csvNameKey && typeof row[column.key] === "string" && row[column.key].trim() ? (
+                              <CardNameLink productId={row.productId}>{row[column.key]}</CardNameLink>
                             ) : (
                               <span
                                 className={
@@ -2185,7 +2190,9 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       {card && (
         <Modal
           error={error}
-          title={card.card?.name ?? "Card details"}
+          title={<CardNameLink productId={card.card?.productId || card.detail?.product?.productId || selectedCardRow?.productId}>
+            {card.card?.name ?? "Card details"}
+          </CardNameLink>}
           onClose={() => setCard(null)}
           wide
         >
