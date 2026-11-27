@@ -21,6 +21,7 @@ import {
   LoaderCircle,
   ExternalLink,
   Pencil,
+  Trash2,
 } from "lucide-react";
 import {
   inventoryColumns,
@@ -313,12 +314,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const [advanced, setAdvanced] = useState(false),
     [view, setView] = useState("all"),
     [modal, setModal] = useState<
-      "settings" | "columns" | "refresh" | "export" | "preset" | "account" | "failures" | "edit" | null
+      "settings" | "columns" | "refresh" | "export" | "preset" | "account" | "failures" | "edit" | "delete" | null
     >(null);
   const [editColumn, setEditColumn] = useState(""),
     [editValue, setEditValue] = useState(""),
     [clearCells, setClearCells] = useState(false),
-    [editBusy, setEditBusy] = useState(false);
+    [rowMutationBusy, setRowMutationBusy] = useState(false);
   const [settings, setSettings] = useState<Preferences>(defaults),
     [saving, setSaving] = useState(false);
   const [snapshot, setSnapshot] = useState<InventorySnapshot|null>(null);
@@ -731,8 +732,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setImportId(null);
   };
   const saveSelectedCells = async () => {
-    if (!meta?.version || !selected.size || !editColumn || (!clearCells && !editValue) || editBusy) return;
-    setEditBusy(true);
+    if (!meta?.version || !selected.size || !editColumn || (!clearCells && !editValue) || rowMutationBusy) return;
+    setRowMutationBusy(true);
     setError("");
     try {
       const edit = await api<{changed: number; newKey: string|null}>("inventory/edit", {
@@ -748,7 +749,26 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     } catch (problem) {
       showError(problem);
     } finally {
-      setEditBusy(false);
+      setRowMutationBusy(false);
+    }
+  };
+  const deleteSelectedRows = async () => {
+    if (!meta?.version || !selected.size || rowMutationBusy) return;
+    setRowMutationBusy(true);
+    setError("");
+    try {
+      const {deleted} = await api<{deleted: number}>("inventory/delete", {
+        version: meta.version,
+        keys: [...selected],
+      });
+      setSelected(new Set());
+      setModal(null);
+      setNotice(deleted === 1 ? "Deleted 1 row from your inventory CSV." : "Deleted " + deleted.toLocaleString() + " rows from your inventory CSV.");
+      await loadMetadata();
+    } catch (problem) {
+      showError(problem);
+    } finally {
+      setRowMutationBusy(false);
     }
   };
   useEffect(() => {
@@ -917,6 +937,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const finishColumnDrag = () => {touchDrag.current = null;setDragColumn(null);setDropColumn(null);};
   const columnAt = (x: number, y: number) => document.elementFromPoint(x,y)?.closest<HTMLElement>("[data-column-key]")?.dataset.columnKey;
   const activeRefresh = refreshRunning || refresh?.status === "running";
+  const rowMutationsDisabled = fileBusy || activeRefresh || !!meta?.importing || rowMutationBusy;
   const progress = refresh?.total
     ? Math.min(
         100,
@@ -985,7 +1006,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               )}
               <button
                 className="button primary"
-                disabled={!hasInventory || activeRefresh || fileBusy}
+                disabled={!meta?.uniqueCards || activeRefresh || fileBusy}
                 onClick={() => {
                   setPlan(null);
                   setScope("all");
@@ -1314,7 +1335,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               <strong>{selected.size.toLocaleString()} selected</strong>
               <button
                 className="button"
-                disabled={fileBusy || activeRefresh || !!meta?.importing || editBusy}
+                disabled={rowMutationsDisabled}
                 onClick={() => {
                   setError("");
                   setEditColumn("");
@@ -1325,6 +1346,17 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               >
                 <Pencil size={15} />
                 Edit selected
+              </button>
+              <button
+                className="button danger-text"
+                disabled={rowMutationsDisabled}
+                onClick={() => {
+                  setError("");
+                  setModal("delete");
+                }}
+              >
+                <Trash2 size={15} />
+                Delete selected
               </button>
               <button
                 className="text-button"
@@ -1479,17 +1511,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                     ))}
                   </tbody>
                 </table>
-                {!result.rows.length && (
+                {!result.rows.length && !loading && (
                   <div className="no-results">
-                    <Search size={24} />
-                    <h3>No cards match this view</h3>
-                    <p>Adjust your search or filters to see more cards.</p>
-                    <button
-                      className="button"
-                      onClick={() => chooseView("all")}
-                    >
-                      Reset filters
-                    </button>
+                    {meta?.uniqueCards ? (
+                      <>
+                        <Search size={24} />
+                        <h3>No cards match this view</h3>
+                        <p>Adjust your search or filters to see more cards.</p>
+                        <button className="button" onClick={() => chooseView("all")}>Reset filters</button>
+                      </>
+                    ) : <h3>No rows in this CSV</h3>}
                   </div>
                 )}
               </div>
@@ -1633,12 +1664,23 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             </p>
             <label>
               Which column contains the TCGplayer Product IDs?
-              <select value={file.mapping.productId} disabled={fileBusy} onChange={event => setFile({...file, mapping: {productId: event.target.value}})}>
+              <select value={file.mapping.productId} disabled={fileBusy} onChange={event => {
+                const productId = event.target.value;
+                setFile({...file, mapping: {...file.mapping, productId, quantity: productId === file.mapping.quantity ? "" : file.mapping.quantity}});
+              }}>
                 <option value="">Choose a column</option>
                 {file.headers.map(header => <option key={header}>{header}</option>)}
               </select>
             </label>
             <p className="small muted">Use the Product ID from a TCGplayer product link, or the link itself. The first row for each Product ID is kept; duplicate IDs are removed. Original columns are preserved. Sales history is pulled only when you request it.</p>
+            <label>
+              Quantity column
+              <select value={file.mapping.quantity ?? ""} disabled={fileBusy}
+                onChange={event => setFile({...file, mapping: {...file.mapping, quantity: event.target.value}})}>
+                <option value="">No quantity column</option>
+                {file.headers.filter(header => header !== file.mapping.productId).map(header => <option key={header}>{header}</option>)}
+              </select>
+            </label>
             {file.mode === "replace" && (
               <label className="check-label danger-text">
                 <input
@@ -1685,34 +1727,51 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
         </Modal>
       )}
       {modal === "edit" && (
-        <Modal title="Edit selected rows" error={error} onClose={() => { if (!editBusy) setModal(null); }}>
+        <Modal title="Edit selected rows" error={error} onClose={() => { if (!rowMutationBusy) setModal(null); }}>
           <form onSubmit={(event) => { event.preventDefault(); void saveSelectedCells(); }}>
             <div className="modal-body edit-cells">
               <p>The new value replaces the chosen CSV cell in {selected.size.toLocaleString()} selected {selected.size === 1 ? "row" : "rows"}.</p>
               <label>
                 CSV column
-                <select value={editColumn} disabled={editBusy} onChange={(event) => setEditColumn(event.target.value)}>
+                <select value={editColumn} disabled={rowMutationBusy} onChange={(event) => setEditColumn(event.target.value)}>
                   <option value="">Choose a column</option>
                   {meta?.headers.map(header => <option key={header}>{header}</option>)}
                 </select>
               </label>
               <label>
                 New value
-                <textarea rows={3} value={editValue} disabled={editBusy || clearCells}
+                <textarea rows={3} value={editValue} disabled={rowMutationBusy || clearCells}
                   onChange={(event) => setEditValue(event.target.value)} />
               </label>
               <label className="check-label">
-                <input type="checkbox" checked={clearCells} disabled={editBusy} onChange={(event) => setClearCells(event.target.checked)} />
+                <input type="checkbox" checked={clearCells} disabled={rowMutationBusy} onChange={(event) => setClearCells(event.target.checked)} />
                 Clear the selected cells
               </label>
             </div>
             <div className="modal-footer">
-              <button type="button" className="button" disabled={editBusy} onClick={() => setModal(null)}>Cancel</button>
-              <button type="submit" className="button primary" disabled={editBusy || !editColumn || (!clearCells && !editValue)}>
-                {editBusy ? "Saving…" : "Save changes"}
+              <button type="button" className="button" disabled={rowMutationBusy} onClick={() => setModal(null)}>Cancel</button>
+              <button type="submit" className="button primary" disabled={rowMutationBusy || !editColumn || (!clearCells && !editValue)}>
+                {rowMutationBusy ? "Saving…" : "Save changes"}
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+      {modal === "delete" && (
+        <Modal title="Delete selected rows?" error={error} onClose={() => { if (!rowMutationBusy) setModal(null); }}>
+          <div className="modal-body">
+            <p>
+              {selected.size === 1
+                ? "This will delete 1 row from your saved inventory CSV."
+                : "This will delete " + selected.size.toLocaleString() + " rows from your saved inventory CSV."} Saved sales history stays linked to each Product ID.
+            </p>
+          </div>
+          <div className="modal-footer">
+            <button className="button" disabled={rowMutationBusy} onClick={() => setModal(null)} autoFocus>Cancel</button>
+            <button className="button danger-text" disabled={rowMutationBusy || !selected.size} onClick={() => void deleteSelectedRows()}>
+              {rowMutationBusy ? "Deleting…" : selected.size === 1 ? "Delete row" : "Delete rows"}
+            </button>
+          </div>
         </Modal>
       )}
       {modal === "account" && <Modal title="API.SH account and usage" error={error} onClose={()=>setModal(null)} wide>

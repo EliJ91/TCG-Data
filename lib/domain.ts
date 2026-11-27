@@ -10,6 +10,7 @@ export type CardInfo = {
   printing: string;
   language: string;
   quantity: number;
+  quantityColumn?: string;
 };
 export type ImportRow = { info: CardInfo; raw: Record<string, string> };
 export type NumericFilter = { field: string; min: string; max: string };

@@ -1,10 +1,10 @@
 import { normalizeLabel, type ImportRow } from "./domain";
-export type Mapping = { productId: string };
+export type Mapping = { productId: string; quantity?: string };
 const aliases: Record<string, string[]> = {
   skuId: ["tcgplayerid", "skuid", "marketplaceskuid"],
   productId: ["productid", "tcgplayerproductid", "producturl", "tcgplayerurl"],
   name: ["productname", "cardname", "name"],
-  quantity: ["totalquantity", "quantity", "qty", "inventoryquantity", "stock"],
+  quantity: ["totalquantity", "quantity", "qty", "inventoryquantity", "stock", "owned", "quantityowned"],
   number: ["number", "cardnumber", "collectornumber"],
   set: ["setname", "set", "expansionname"],
   rarity: ["rarity"],
@@ -81,14 +81,19 @@ export function parseCSV(text: string) {
   return { headers, records };
 }
 export function mapColumns(headers: string[]): Mapping {
-  return { productId: headers.find(header => aliases.productId.includes(normalizeLabel(header))) ?? "" };
+  return {
+    productId: headers.find(header => aliases.productId.includes(normalizeLabel(header))) ?? "",
+    quantity: aliases.quantity.map(alias => headers.find(header => normalizeLabel(header) === alias)).find(Boolean) ?? "",
+  };
 }
 export function csvInfoField(headers: string[], column: string) {
-  return Object.keys(aliases).find(field => field !== "productId" && field !== "skuId" &&
+  return Object.keys(aliases).find(field => field !== "productId" && field !== "skuId" && field !== "quantity" &&
     headers.find(header => aliases[field].includes(normalizeLabel(header))) === column);
 }
 export function csvQuantity(value: string) {
-  const quantity = Number(value.trim().replace(/,/g, ""));
+  const text = value.trim();
+  if (!/^\+?(?:\d+|\d{1,3}(?:,\d{3})+)(?:\.0+)?$/.test(text)) return 0;
+  const quantity = Number(text.replace(/,/g, ""));
   return Number.isSafeInteger(quantity) && quantity >= 0 ? quantity : 0;
 }
 export function productIdFrom(value: string) {
@@ -109,11 +114,15 @@ export function prepareImport(
   const selected = mapping ?? mapColumns(headers);
   if (!selected.productId || !headers.includes(selected.productId))
     throw new Error("Choose the column containing TCGplayer Product IDs.");
+  const quantityColumn = selected.quantity ?? mapColumns(headers).quantity ?? "";
+  if (quantityColumn && (!headers.includes(quantityColumn) || quantityColumn === selected.productId))
+    throw new Error("Choose a separate column for the quantity.");
   // Other columns are optional and remain untouched in raw. Recognized names
   // only provide a useful row title and inventory totals, never import rules.
   const fields = Object.fromEntries(Object.entries(aliases).map(([key, names]) =>
     [key, headers.find(header => names.includes(normalizeLabel(header))) ?? ""]));
   fields.productId = selected.productId;
+  fields.quantity = quantityColumn;
   const indices = Object.fromEntries(
     Object.entries(fields).map(([key, header]) => [
       key,
@@ -149,6 +158,7 @@ export function prepareImport(
         printing,
         language,
         quantity,
+        quantityColumn,
       },
       raw: Object.fromEntries(headers.map((header, i) => [header, record[i]])),
     });

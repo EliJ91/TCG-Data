@@ -237,21 +237,26 @@ export async function uploadChunk(
     start + rows.length > session.expected
   )
     throw new AppError("Invalid import chunk.");
+  const headers = new Set<string>(JSON.parse(session.headers));
   for (const row of rows)
     if (
       !row.info?.key ||
       (!/^\d+$/.test(row.info.skuId) && !/^\d+$/.test(row.info.productId)) ||
       !Number.isSafeInteger(row.info.quantity) ||
       row.info.quantity < 0 ||
-      !row.raw
+      !row.raw ||
+      (row.info.quantityColumn !== undefined && row.info.quantityColumn !== "" &&
+        (!headers.has(row.info.quantityColumn) || typeof row.raw[row.info.quantityColumn] !== "string"))
     )
       throw new AppError("An inventory row is invalid.");
   const data = rows.map((row, index) => {
     const productId = /^\d+$/.test(row.info.productId) ? productIdFrom(String(row.info.productId)) : "";
     const skuId = /^\d+$/.test(row.info.skuId) ? String(row.info.skuId).replace(/^0+(?=\d)/, "") : "";
     const key = productId ? "product:" + productId + "|row:0" : "sku:" + skuId;
+    const source = row.info.quantityColumn;
+    const quantity = source === undefined ? row.info.quantity : csvQuantity(source ? row.raw[source] : "");
     return {id: id + ":" + (start + index), rowNo: start + index, key,
-      info: JSON.stringify({...row.info, productId, skuId, key}), raw: JSON.stringify(row.raw)};
+      info: JSON.stringify({...row.info, productId, skuId, key, quantity}), raw: JSON.stringify(row.raw)};
   });
   await database()
     .prepare(
@@ -378,58 +383,83 @@ export async function commitImport(owner: string, id: string, lightweight = fals
   return lightweight ? {saved:true} : state(owner);
 }
 
-export async function editInventory(owner: string, input: {
-  version: string; keys: string[]; column: string; value: string;
-}) {
+type InventorySelection = { version: string; keys: string[] };
+
+function selectedInventoryKeys(input: InventorySelection) {
   if (!Array.isArray(input?.keys) || !input.keys.length ||
-      input.keys.some(key => typeof key !== "string" || !key) ||
-      typeof input.column !== "string" || typeof input.value !== "string" || input.value.includes("\0"))
-    throw new AppError("Select rows and enter a valid CSV cell value.");
+      input.keys.some(key => typeof key !== "string" || !key))
+    throw new AppError("Select at least one inventory row.");
+  if (typeof input.version !== "string" || !input.version)
+    throw new AppError("Inventory changed. Reload and try again.",409);
+  return [...new Set(input.keys)];
+}
+
+function guardInventoryMutation(owner: string, version: string, selected: string) {
+  // The following statements check changes() inside the same transaction.
+  // A stale selection or a concurrent import must leave every row untouched.
+  return database().prepare(`UPDATE workspaces SET updated_at=MAX(COALESCE(updated_at,0)+1,?)
+    WHERE owner=? AND active_version=? AND import_lock IS NULL
+      AND NOT EXISTS (SELECT 1 FROM refresh_runs WHERE owner=workspaces.owner AND status='running')
+      AND NOT EXISTS (
+        SELECT 1 FROM json_each(?) wanted WHERE NOT EXISTS (
+          SELECT 1 FROM cards WHERE owner=workspaces.owner AND version=workspaces.active_version AND card_key=wanted.value
+        )
+      )`).bind(Date.now(), owner, version, selected);
+}
+
+function inventoryChangeEvents(owner: string, subjects: string) {
+  return database().prepare(`INSERT INTO sync_events(owner,kind,subject)
+    SELECT ?,'inventory',value FROM json_each(?) WHERE changes()>0`).bind(owner, subjects);
+}
+
+export async function editInventory(owner: string, input: InventorySelection & { column: string; value: string }) {
+  const keys = selectedInventoryKeys(input);
+  if (typeof input.column !== "string" || typeof input.value !== "string" || input.value.includes("\0"))
+    throw new AppError("Enter a valid CSV cell value.");
   const space = await workspace(owner);
   if (!space.active_version || space.active_version !== input.version)
     throw new AppError("Inventory changed. Reload before editing these rows.", 409);
   const headers: string[] = JSON.parse(space.headers);
   const {column, value, version} = input;
   if (!headers.includes(column)) throw new AppError("Choose a column from the current CSV.");
-  const keys = [...new Set(input.keys)];
+  const defaults = mapColumns(headers);
   const savedColumn = preferences(space).productIdColumn;
-  const idColumn = savedColumn && headers.includes(savedColumn) ? savedColumn : mapColumns(headers).productId;
+  const idColumn = savedColumn && headers.includes(savedColumn) ? savedColumn : defaults.productId;
   const changeProduct = column === idColumn;
   const productId = changeProduct ? productIdFrom(value) : "";
   if (changeProduct && (keys.length !== 1 || !productId))
     throw new AppError("A Product ID must be a number or a TCGplayer product link. Edit Product IDs one row at a time.");
   const newKey = changeProduct ? "product:" + productId + "|row:0" : null;
   const field = changeProduct ? undefined : csvInfoField(headers, column);
-  const quantity = field === "quantity" ? csvQuantity(value) : undefined;
-  const infoArgs = changeProduct ? [productId, newKey] : field ? ["$." + field, quantity ?? value.trim()] : [];
+  const baseArgs = changeProduct ? [productId, newKey] : field ? ["$." + field, value.trim()] : [];
   const fieldValue = field === "name" ? "COALESCE(NULLIF(?,''),'Product '||json_extract(info,'$.productId'))" : "?";
-  const info = changeProduct ? "json_set(info,'$.productId',?,'$.key',?)"
+  const baseInfo = changeProduct ? "json_set(info,'$.productId',?,'$.key',?)"
     : field ? "json_set(info,?," + fieldValue + ")" : "info";
+  const quantityMatches = "COALESCE(json_extract(info,'$.quantityColumn'),?)=?";
+  const quantityColumnArgs = [defaults.quantity ?? "",column];
+  const quantity = csvQuantity(value);
+  const info = changeProduct ? baseInfo :
+    `CASE WHEN ${quantityMatches} THEN json_set(${baseInfo},'$.quantity',?) ELSE ${baseInfo} END`;
+  const infoArgs = changeProduct ? baseArgs : [...quantityColumnArgs,...baseArgs,quantity,...baseArgs];
   const selected = JSON.stringify(keys);
   const path = "$." + JSON.stringify(column);
   const db = database();
   const statements = [
-    db.prepare(`UPDATE workspaces SET updated_at=MAX(COALESCE(updated_at,0)+1,?)
-      WHERE owner=? AND active_version=? AND import_lock IS NULL
-        AND NOT EXISTS (SELECT 1 FROM refresh_runs WHERE owner=workspaces.owner AND status='running')
-        AND NOT EXISTS (
-          SELECT 1 FROM json_each(?) wanted WHERE NOT EXISTS (
-            SELECT 1 FROM cards WHERE owner=workspaces.owner AND version=workspaces.active_version AND card_key=wanted.value
-          )
-        )`).bind(Date.now(), owner, version, selected),
+    guardInventoryMutation(owner,version,selected),
     db.prepare(`UPDATE inventory_rows SET raw=json_set(raw,?,?),info=${info}${newKey ? ",card_key=?" : ""}
       WHERE owner=? AND version=? AND card_key IN (SELECT value FROM json_each(?))
         AND changes()>0 AND (json_extract(raw,?) IS NOT ?${newKey ? " OR card_key<>?" : ""})`)
       .bind(path, value, ...infoArgs, ...(newKey ? [newKey] : []), owner, version, selected, path, value, ...(newKey ? [newKey] : [])),
   ];
-  if (field || newKey) statements.push(
-    db.prepare(`UPDATE cards SET info=${info}${newKey ? ",card_key=?" : ""}${quantity !== undefined ? ",quantity=?" : ""}
-      WHERE owner=? AND version=? AND card_key IN (SELECT value FROM json_each(?)) AND changes()>0`)
-      .bind(...infoArgs, ...(newKey ? [newKey] : []), ...(quantity !== undefined ? [quantity] : []), owner, version, selected),
-  );
   const subjects = newKey && newKey !== keys[0] ? [...keys, newKey] : keys;
-  statements.push(db.prepare(`INSERT INTO sync_events(owner,kind,subject)
-    SELECT ?,'inventory',value FROM json_each(?) WHERE changes()>0`).bind(owner, JSON.stringify(subjects)));
+  statements.push(inventoryChangeEvents(owner,JSON.stringify(subjects)));
+  statements.push(
+    db.prepare(`UPDATE cards SET info=${info},${newKey ? "card_key=?" : "quantity=CASE WHEN " + quantityMatches + " THEN ? ELSE quantity END"}
+      WHERE owner=? AND version=? AND card_key IN (SELECT value FROM json_each(?)) AND changes()>0
+      ${field || newKey ? "" : "AND " + quantityMatches}`)
+      .bind(...infoArgs, ...(newKey ? [newKey] : [...quantityColumnArgs,quantity]), owner, version, selected,
+        ...(field || newKey ? [] : quantityColumnArgs)),
+  );
   try {
     const [guard, edits] = await db.batch(statements);
     if (!guard.meta.changes)
@@ -440,6 +470,24 @@ export async function editInventory(owner: string, input: {
       throw new AppError("That Product ID is already in the inventory.", 409);
     throw error;
   }
+}
+
+export async function deleteInventory(owner: string, input: InventorySelection) {
+  const selected = JSON.stringify(selectedInventoryKeys(input));
+  const {version} = input;
+  const db = database();
+  // Sales are stored separately by product and can be used if a card returns.
+  const [guard, deleted] = await db.batch([
+    guardInventoryMutation(owner,version,selected),
+    db.prepare(`DELETE FROM cards WHERE owner=? AND version=?
+      AND card_key IN (SELECT value FROM json_each(?)) AND changes()>0`).bind(owner,version,selected),
+    inventoryChangeEvents(owner,selected),
+    db.prepare(`DELETE FROM inventory_rows WHERE owner=? AND version=?
+      AND card_key IN (SELECT value FROM json_each(?)) AND changes()>0`).bind(owner,version,selected),
+  ]);
+  if (!guard.meta.changes)
+    throw new AppError("Inventory is busy or the selected rows changed. Reload and try again.",409);
+  return {deleted: deleted.meta.changes ?? 0};
 }
 const marketFields = columns.filter(
   (column) =>

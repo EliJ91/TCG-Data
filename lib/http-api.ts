@@ -9,6 +9,7 @@ import {
   startImport,
   uploadChunk,
   editInventory,
+  deleteInventory,
   commitImport,
   cancelImport,
   savePreferences,
@@ -49,6 +50,8 @@ export async function handleApi(request:Request,owner:string,path:string,allowed
         return Response.json(await cancelImport(owner, body.id));
       if (path === "inventory/edit")
         return Response.json(await editInventory(owner, body));
+      if (path === "inventory/delete")
+        return Response.json(await deleteInventory(owner, body));
       if (path === "market/recover") return Response.json(await recoverResult(owner,body.id));
       if (path === "market/product") return Response.json(await linkProduct(owner,body.key,String(body.productId??"")));
       if (path === "market/plan")

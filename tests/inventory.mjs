@@ -241,6 +241,89 @@ test("Selected CSV cells save in place and sync to other devices and CSV exports
  assert.equal(sql.prepare("SELECT COUNT(*) AS count FROM market WHERE owner=?").get(owner).count,2);
 });
 
+test("Single and bulk deletion remove saved CSV rows and keep product sales", async () => {
+ const owner = "delete-rows-test", requests = [];
+ const filename = "delete.csv";
+ const uploadRows = async (account, csvText, mode = "replace") => {
+  const prepared = csv.prepareImport(csvText,{productId:"Lookup"});
+  const {id} = await data.startImport(account,{mode,filename,headers:prepared.headers,count:prepared.rows.length});
+  await data.uploadChunk(account,id,0,prepared.rows);
+  await data.commitImport(account,id,true,"Lookup");
+  return id;
+ };
+ const header = "Lookup,Name";
+ const version = await uploadRows(owner,header+"\n101,One\n102,Two\n103,Three");
+ const anotherOwner = "delete-rows-other-owner";
+ await uploadRows(anotherOwner,header+"\n101,Separate inventory");
+ const first = "product:101|row:0", second = "product:102|row:0", third = "product:103|row:0";
+ sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?)")
+  .run(owner+"|"+first,owner,first,"101",100,JSON.stringify({analyzed:true,available:true,unitsSold:9}),"{}");
+ const api = route => {
+  const [name,search] = route.split("?");
+  const params = new URLSearchParams(search);
+  requests.push(name);
+  if (name==="sync/meta") return sync.syncMetadata(owner,params.get("version"));
+  if (name==="sync/inventory") return sync.syncInventory(owner,params);
+  assert.equal(name,"sync/changes");
+  return sync.syncChanges(owner,params);
+ };
+ let cached = await clientSync.synchronizeInventory(api,owner,null);
+ requests.length = 0;
+ const remove = (keys, activeVersion = version) => data.deleteInventory(owner,{version:activeVersion,keys});
+ await assert.rejects(remove([first],"stale-version"),{status:409});
+ await assert.rejects(remove([first,"missing"]),{status:409});
+ await assert.rejects(remove([]),{status:400});
+ assert.equal((await data.state(owner)).uniqueCards,3);
+ assert.equal((await remove([first])).deleted,1);
+ cached = await clientSync.synchronizeInventory(api,owner,cached);
+ assert.deepEqual(cached.cards.map(card=>card.key),[second,third]);
+ assert.deepEqual(requests.splice(0),["sync/meta","sync/changes"]);
+ assert.deepEqual(csv.parseCSV(await (await data.exportInventory(owner,{})).text()).records,[["102","Two"],["103","Three"]]);
+ assert.equal((await data.state(anotherOwner)).uniqueCards,1);
+
+ const beforeBulk = cached;
+ assert.equal((await remove([second,third,third])).deleted,2);
+ assert.equal((await data.state(owner)).uniqueCards,0);
+ assert.equal((await (await data.exportInventory(owner,{})).text()).trim(),header);
+ cached = await clientSync.synchronizeInventory(api,owner,cached);
+ assert.deepEqual(cached.cards,[]);
+ assert.deepEqual(requests.splice(0),["sync/meta","sync/changes"]);
+ assert.equal((await local.localExport([],{},cached.meta.headers,24,false).text()).trim(),header);
+
+ await uploadRows(owner,header+"\n101,Restored","update");
+ cached = await clientSync.synchronizeInventory(api,owner,beforeBulk);
+ assert.deepEqual(requests.splice(0),["sync/meta","sync/inventory","sync/changes"]);
+ const restored = local.queryLocalInventory(local.indexInventory(cached.cards),{},24).rows;
+ assert.deepEqual(restored.map(row=>[row.key,row["csv:Name"],row.unitsSold]),[[first,"Restored",9]]);
+});
+
+test("CSV quantities use the chosen column independently for each uploaded row", async () => {
+ const owner = "quantity-import-test";
+ const headings = "Lookup,Quantity,Add to Quantity,Total Quantity,Shelf count\n";
+ const first = csv.prepareImport(headings+'101,7,90,12,3\n102,8,80,0,4\n103,9,70,"1,200",5',{productId:"Lookup"});
+ assert.deepEqual(first.rows.map(row=>row.info.quantity),[12,0,1200]);
+ assert.equal(csv.mapColumns(["Lookup","Add to Quantity"]).quantity,"");
+ const save = async (prepared, mode) => {
+  const {id} = await data.startImport(owner,{mode,filename:"quantity.csv",headers:prepared.headers,count:prepared.rows.length});
+  await data.uploadChunk(owner,id,0,prepared.rows);
+  await data.commitImport(owner,id,true,"Lookup");
+  return id;
+ };
+ // The server derives the count from the row's selected CSV cell.
+ first.rows[0].info.quantity=999;
+ await save(first,"replace");
+ const second = csv.prepareImport(headings+"104,6,80,55,4",{productId:"Lookup",quantity:"Shelf count"});
+ const version = await save(second,"update");
+ const counts = async () => (await data.queryCards(owner,{sort:"productId",direction:"asc"})).rows.map(row=>[row.productId,row.quantity]);
+ assert.deepEqual(await counts(),[["101",12],["102",0],["103",1200],["104",4]]);
+ assert.equal((await data.state(owner)).totalCards,1216);
+ const keys = ["product:101|row:0","product:104|row:0"];
+ await data.editInventory(owner,{version,keys,column:"Shelf count",value:"16"});
+ assert.deepEqual(await counts(),[["101",12],["102",0],["103",1200],["104",16]]);
+ await data.editInventory(owner,{version,keys,column:"Total Quantity",value:"2"});
+ assert.deepEqual(await counts(),[["101",2],["102",0],["103",1200],["104",16]]);
+});
+
 test("Only sales quantities can be charged and dates filter the saved history, including old saved options and old refresh runs",async()=>{
  const realFetch=globalThis.fetch,paid=[];
  globalThis.inventoryTestEnv.API_SH_API_KEY="local-test-only-key";
