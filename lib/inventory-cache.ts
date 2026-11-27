@@ -110,7 +110,18 @@ export async function synchronizeInventory(api: SyncApi, scope: string, previous
     cards = [...current.values()];
   }
   if ((sameVersion || canPatch) && previous && previous.meta.sequence < meta.sequence) {
-    const events = await pages<SyncEvent>(api,"sync/changes?through="+meta.sequence,previous.meta.sequence);
+    const events = await pages<SyncEvent>(api,"sync/changes?inventoryEdits=1&through="+meta.sequence,previous.meta.sequence);
+    if (events.some(event=>event.kind==="inventory")) {
+      const current = new Map(cards.map(card=>[card.key,card]));
+      for (const event of events) {
+        if (event.kind !== "inventory") continue;
+        const {subject:key,rowNo,raw,info,quantity,marketProduct,mappedProduct,data,detail,fetchedAt,extraOriginals} = event;
+        if (rowNo === null || raw === null || info === null || quantity === null) current.delete(key);
+        else current.set(key,{key,rowNo,raw,info,quantity,marketProduct,mappedProduct,data,detail,fetchedAt,
+          originals:JSON.parse(extraOriginals)});
+      }
+      cards = [...current.values()];
+    }
     const market = new Map(events.filter(event=>event.kind==="market").map(event=>[event.subject,event]));
     const skus = new Map(events.filter(event=>event.kind==="sku").map(event=>[event.subject,event.mappedProduct]));
     cards = cards.map(card=>{

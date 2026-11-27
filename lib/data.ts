@@ -15,7 +15,7 @@ import {
   type Filters,
   type ImportRow,
 } from "./domain";
-import { csvCell, productIdFrom } from "./csv";
+import { csvCell, csvInfoField, csvQuantity, mapColumns, productIdFrom } from "./csv";
 
 export type Workspace = {
   owner: string;
@@ -98,6 +98,7 @@ export async function state(owner: string) {
     FROM cards c LEFT JOIN market m ON m.owner=c.owner AND m.card_key=c.card_key LEFT JOIN api_cache a ON a.id=c.owner||'|sku-map:'||json_extract(c.info,'$.skuId') WHERE c.owner=? AND c.version=?`).bind(owner,space.active_version??"").first<any>();
   return {
     ...coverage,
+    version: space.active_version ?? "",
     unanalyzedProducts: Number(coverage?.uniqueProducts??0)-Number(coverage?.analyzedProducts??0),
     filename: space.filename,
     headers: JSON.parse(space.headers),
@@ -280,7 +281,7 @@ export async function cancelImport(owner: string, id: string) {
   ]);
   return { cancelled: true };
 }
-export async function commitImport(owner: string, id: string, lightweight = false) {
+export async function commitImport(owner: string, id: string, lightweight = false, productIdColumn?: string) {
   const session = await importSession(owner, id);
   if (session.status === "complete") return lightweight ? {saved:true} : state(owner);
   const space = await workspace(owner);
@@ -294,17 +295,21 @@ export async function commitImport(owner: string, id: string, lightweight = fals
     .first<{ count: number }>();
   if (count?.count !== session.expected)
     throw new AppError("The complete CSV has not been uploaded.");
+  const uploadedHeaders: string[] = JSON.parse(session.headers);
+  if (productIdColumn !== undefined && !uploadedHeaders.includes(productIdColumn))
+    throw new AppError("Choose the column containing TCGplayer Product IDs.");
   const headers =
     session.mode === "update"
       ? [
           ...new Set([
             ...JSON.parse(space.headers),
-            ...JSON.parse(session.headers),
+            ...uploadedHeaders,
           ]),
         ]
-      : JSON.parse(session.headers);
+      : uploadedHeaders;
   const statements: D1PreparedStatement[] = [];
   const settings = inventoryPreferences(preferences(space), headers);
+  if (productIdColumn !== undefined) settings.productIdColumn = productIdColumn;
   const canonicalId = (alias: string, field: string) => "COALESCE(NULLIF(LTRIM(json_extract("+alias+".info,'$."+field+"'),'0'),''),'0')";
   const identity = (alias: string) => "CASE WHEN COALESCE(json_extract("+alias+".info,'$.productId'),'')<>'' THEN 'product:'||"+canonicalId(alias,"productId")+"||'|row:0' ELSE 'sku:'||"+canonicalId(alias,"skuId")+" END";
   if (session.mode === "update" && space.active_version)
@@ -371,6 +376,70 @@ export async function commitImport(owner: string, id: string, lightweight = fals
     );
   await database().batch(statements);
   return lightweight ? {saved:true} : state(owner);
+}
+
+export async function editInventory(owner: string, input: {
+  version: string; keys: string[]; column: string; value: string;
+}) {
+  if (!Array.isArray(input?.keys) || !input.keys.length ||
+      input.keys.some(key => typeof key !== "string" || !key) ||
+      typeof input.column !== "string" || typeof input.value !== "string" || input.value.includes("\0"))
+    throw new AppError("Select rows and enter a valid CSV cell value.");
+  const space = await workspace(owner);
+  if (!space.active_version || space.active_version !== input.version)
+    throw new AppError("Inventory changed. Reload before editing these rows.", 409);
+  const headers: string[] = JSON.parse(space.headers);
+  const {column, value, version} = input;
+  if (!headers.includes(column)) throw new AppError("Choose a column from the current CSV.");
+  const keys = [...new Set(input.keys)];
+  const savedColumn = preferences(space).productIdColumn;
+  const idColumn = savedColumn && headers.includes(savedColumn) ? savedColumn : mapColumns(headers).productId;
+  const changeProduct = column === idColumn;
+  const productId = changeProduct ? productIdFrom(value) : "";
+  if (changeProduct && (keys.length !== 1 || !productId))
+    throw new AppError("A Product ID must be a number or a TCGplayer product link. Edit Product IDs one row at a time.");
+  const newKey = changeProduct ? "product:" + productId + "|row:0" : null;
+  const field = changeProduct ? undefined : csvInfoField(headers, column);
+  const quantity = field === "quantity" ? csvQuantity(value) : undefined;
+  const infoArgs = changeProduct ? [productId, newKey] : field ? ["$." + field, quantity ?? value.trim()] : [];
+  const fieldValue = field === "name" ? "COALESCE(NULLIF(?,''),'Product '||json_extract(info,'$.productId'))" : "?";
+  const info = changeProduct ? "json_set(info,'$.productId',?,'$.key',?)"
+    : field ? "json_set(info,?," + fieldValue + ")" : "info";
+  const selected = JSON.stringify(keys);
+  const path = "$." + JSON.stringify(column);
+  const db = database();
+  const statements = [
+    db.prepare(`UPDATE workspaces SET updated_at=MAX(COALESCE(updated_at,0)+1,?)
+      WHERE owner=? AND active_version=? AND import_lock IS NULL
+        AND NOT EXISTS (SELECT 1 FROM refresh_runs WHERE owner=workspaces.owner AND status='running')
+        AND NOT EXISTS (
+          SELECT 1 FROM json_each(?) wanted WHERE NOT EXISTS (
+            SELECT 1 FROM cards WHERE owner=workspaces.owner AND version=workspaces.active_version AND card_key=wanted.value
+          )
+        )`).bind(Date.now(), owner, version, selected),
+    db.prepare(`UPDATE inventory_rows SET raw=json_set(raw,?,?),info=${info}${newKey ? ",card_key=?" : ""}
+      WHERE owner=? AND version=? AND card_key IN (SELECT value FROM json_each(?))
+        AND changes()>0 AND (json_extract(raw,?) IS NOT ?${newKey ? " OR card_key<>?" : ""})`)
+      .bind(path, value, ...infoArgs, ...(newKey ? [newKey] : []), owner, version, selected, path, value, ...(newKey ? [newKey] : [])),
+  ];
+  if (field || newKey) statements.push(
+    db.prepare(`UPDATE cards SET info=${info}${newKey ? ",card_key=?" : ""}${quantity !== undefined ? ",quantity=?" : ""}
+      WHERE owner=? AND version=? AND card_key IN (SELECT value FROM json_each(?)) AND changes()>0`)
+      .bind(...infoArgs, ...(newKey ? [newKey] : []), ...(quantity !== undefined ? [quantity] : []), owner, version, selected),
+  );
+  const subjects = newKey && newKey !== keys[0] ? [...keys, newKey] : keys;
+  statements.push(db.prepare(`INSERT INTO sync_events(owner,kind,subject)
+    SELECT ?,'inventory',value FROM json_each(?) WHERE changes()>0`).bind(owner, JSON.stringify(subjects)));
+  try {
+    const [guard, edits] = await db.batch(statements);
+    if (!guard.meta.changes)
+      throw new AppError("Inventory is busy or the selected rows changed. Reload and try again.", 409);
+    return {changed: edits.meta.changes ?? 0, newKey};
+  } catch (error) {
+    if (newKey && /UNIQUE constraint failed: cards\.owner, cards\.version, cards\.card_key/i.test(String(error)))
+      throw new AppError("That Product ID is already in the inventory.", 409);
+    throw error;
+  }
 }
 const marketFields = columns.filter(
   (column) =>

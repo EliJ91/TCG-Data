@@ -186,6 +186,61 @@ test("Replacing a CSV retains and restores product sales while hiding removed ca
  }
 });
 
+test("Selected CSV cells save in place and sync to other devices and CSV exports", async () => {
+ const owner = "bulk-edit-test", requests = [];
+ const prepared = csv.prepareImport("Lookup,Name,Quantity,Tags\n101,One,2,old\n102,Two,4,old\n103,Three,1,keep",{productId:"Lookup"});
+ const {id:version} = await data.startImport(owner,{mode:"replace",filename:"edit.csv",headers:prepared.headers,count:3});
+ await data.uploadChunk(owner,version,0,prepared.rows);
+ await data.commitImport(owner,version,true,"Lookup");
+ const [first,second,third] = prepared.rows.map(row => row.info.key);
+ const insert = sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?)");
+ insert.run(owner+"|"+first,owner,first,"101",100,JSON.stringify({analyzed:true,available:true,unitsSold:9}),"{}");
+ const returned = "product:104|row:0";
+ insert.run(owner+"|"+returned,owner,returned,"104",100,JSON.stringify({analyzed:true,available:true,unitsSold:6}),"{}");
+ const api = route => {
+  const [name,search] = route.split("?");
+  const params = new URLSearchParams(search);
+  requests.push(name);
+  if (name==="sync/meta") return sync.syncMetadata(owner,params.get("version"));
+  if (name==="sync/inventory") return sync.syncInventory(owner,params);
+  assert.equal(name,"sync/changes");
+  return sync.syncChanges(owner,params);
+ };
+ let cached = await clientSync.synchronizeInventory(api,owner,null);
+ requests.length = 0;
+ const edit = (keys,column,value,inputVersion=version) => data.editInventory(owner,{version:inputVersion,keys,column,value});
+ const tag = 'listed, "ready"\nNext shelf';
+ assert.equal((await edit([first,second,first],"Tags",tag)).changed,2);
+ await assert.rejects(sync.syncChanges(owner,new URLSearchParams({after:String(cached.meta.sequence),through:String((await sync.syncMetadata(owner,version)).sequence)})),{status:409});
+ assert.equal((await edit([first,second],"Tags",tag)).changed,0);
+ assert.equal((await edit([first],"Quantity","1,200")).changed,1);
+ await edit([second],"Name","Renamed Two");
+ await assert.rejects(edit([third,"missing"],"Tags","unapplied"),{status:409});
+ await assert.rejects(edit([third],"Tags","old version","old"),{status:409});
+ await assert.rejects(edit([third],"unitsSold","123"),{status:400});
+ await assert.rejects(edit([first,second],"Lookup","104"),{status:400});
+ await assert.rejects(edit([first],"Lookup","102"),/already in the inventory/);
+ cached = await clientSync.synchronizeInventory(api,owner,cached);
+ assert.deepEqual(requests.splice(0),["sync/meta","sync/changes"]);
+ const rows = snapshot => local.queryLocalInventory(local.indexInventory(snapshot.cards),
+  {sort:"rowNo",direction:"asc"},24).rows;
+ assert.deepEqual(rows(cached).map(row=>[row["csv:Tags"],row.quantity,row.name,row.unitsSold]),
+  [[tag,1200,"One",9],[tag,4,"Renamed Two",null],["keep",1,"Three",null]]);
+ const exported = async result => csv.parseCSV(await result.text()).records;
+ const nextCsv = [["101","One","1,200",tag],["102","Renamed Two","4",tag],["103","Three","1","keep"]];
+ assert.deepEqual(await exported(await data.exportInventory(owner,{})),nextCsv);
+ assert.deepEqual(await exported(local.localExport(local.indexInventory(cached.cards),{},prepared.headers,24,false)),nextCsv);
+ const updated = await edit([first],"Lookup","https://www.tcgplayer.com/product/000104/card");
+ assert.equal(updated.newKey,returned);
+ await edit([second],"Tags","");
+ const previous = cached;
+ cached = await clientSync.synchronizeInventory(api,owner,cached);
+ assert.deepEqual(rows(cached).map(row=>[row.key,row["csv:Tags"],row.unitsSold]),
+  [[returned,tag,6],[second,"",null],[third,"keep",null]]);
+ assert.strictEqual(cached.cards.find(row=>row.key===third),previous.cards.find(row=>row.key===third));
+ assert.equal(sql.prepare("SELECT COUNT(*) AS count FROM market WHERE owner=?").get(owner).count,2);
+});
+
 test("Only sales quantities can be charged and dates filter the saved history, including old saved options and old refresh runs",async()=>{
  const realFetch=globalThis.fetch,paid=[];
  globalThis.inventoryTestEnv.API_SH_API_KEY="local-test-only-key";

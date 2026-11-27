@@ -79,10 +79,19 @@ export async function syncChanges(owner: string, params: URLSearchParams) {
   await limitOperation(owner,"inventory-pages",1200,86_400_000);
   const rows = await database().prepare(
     "SELECT e.seq,e.kind,e.subject,m.product_id AS marketProduct,m.data,m.detail,m.fetched_at AS fetchedAt," +
-    "json_extract(a.data,'$.productId') AS mappedProduct FROM sync_events e INDEXED BY sync_events_owner_seq " +
-    "LEFT JOIN market m ON e.kind='market' AND m.owner=e.owner AND m.card_key=e.subject " +
-    "LEFT JOIN api_cache a ON e.kind='sku' AND a.id=e.owner||'|sku-map:'||e.subject " +
+    "json_extract(a.data,'$.productId') AS mappedProduct,r.row_no AS rowNo,r.raw,c.info,c.quantity," +
+    "(SELECT json_group_array(json_object('rowNo',other.row_no,'raw',other.raw)) FROM inventory_rows other INDEXED BY rows_card " +
+    "WHERE other.owner=r.owner AND other.version=r.version AND other.card_key=r.card_key AND other.id<>r.id) AS extraOriginals " +
+    "FROM sync_events e INDEXED BY sync_events_owner_seq " +
+    "LEFT JOIN workspaces w ON e.kind='inventory' AND w.owner=e.owner " +
+    "LEFT JOIN cards c ON c.owner=w.owner AND c.version=w.active_version AND c.card_key=e.subject " +
+    "LEFT JOIN inventory_rows r ON r.id=(SELECT id FROM inventory_rows INDEXED BY rows_card " +
+    "WHERE owner=c.owner AND version=c.version AND card_key=c.card_key ORDER BY row_no LIMIT 1) " +
+    "LEFT JOIN market m ON e.kind IN ('market','inventory') AND m.owner=e.owner AND m.card_key=e.subject " +
+    "LEFT JOIN api_cache a ON a.id=e.owner||'|sku-map:'||CASE WHEN e.kind='sku' THEN e.subject ELSE json_extract(c.info,'$.skuId') END " +
     "WHERE e.owner=? AND e.seq>? AND e.seq<=? ORDER BY e.seq LIMIT ?"
-  ).bind(owner,after,through,PAGE_SIZE).all<{seq:number}>();
+  ).bind(owner,after,through,PAGE_SIZE).all<{seq:number;kind:string}>();
+  if (!params.has("inventoryEdits") && rows.results.some(row=>row.kind==="inventory"))
+    throw new AppError("Reload the app to sync edited inventory rows.",409);
   return {rows:rows.results,next:rows.results.length===PAGE_SIZE ? rows.results.at(-1)!.seq : null};
 }

@@ -20,6 +20,7 @@ import {
   Clock3,
   LoaderCircle,
   ExternalLink,
+  Pencil,
 } from "lucide-react";
 import {
   inventoryColumns,
@@ -50,6 +51,7 @@ const HistoryChart = lazy(() => import("./HistoryChart"));
 const salesColumnKeys = new Set(marketColumns.map(column => column.key));
 type RecordValue = Record<string, any>;
 type Metadata = {
+  version: string;
   headers: string[];
   historyFrom: number | null;
   historyTo: number | null;
@@ -311,8 +313,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const [advanced, setAdvanced] = useState(false),
     [view, setView] = useState("all"),
     [modal, setModal] = useState<
-      "settings" | "columns" | "refresh" | "export" | "preset" | "account" | "failures" | null
+      "settings" | "columns" | "refresh" | "export" | "preset" | "account" | "failures" | "edit" | null
     >(null);
+  const [editColumn, setEditColumn] = useState(""),
+    [editValue, setEditValue] = useState(""),
+    [clearCells, setClearCells] = useState(false),
+    [editBusy, setEditBusy] = useState(false);
   const [settings, setSettings] = useState<Preferences>(defaults),
     [saving, setSaving] = useState(false);
   const [snapshot, setSnapshot] = useState<InventorySnapshot|null>(null);
@@ -663,8 +669,6 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     try {
       const prepared: { headers: string[]; rows: ImportRow[]; duplicateCount: number } =
         await runImportWorker(file.text, "prepare", file.mapping);
-      const saved = await persistSettings({productIdColumn: file.mapping.productId});
-      setSettings(current => ({...current, productIdColumn: saved.productIdColumn}));
       const started = await api<{ id: string }>(
         "imports/start",
         {
@@ -694,7 +698,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
       }
       await api(
         "imports/commit",
-        { id, sync: !!inventoryCacheScope() },
+        { id, sync: !!inventoryCacheScope(), productIdColumn: file.mapping.productId },
         controller.signal,
       );
       await loadMetadata();
@@ -725,6 +729,27 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     if (importId) void api("imports/cancel", { id: importId }).catch(showError);
     setFile(null);
     setImportId(null);
+  };
+  const saveSelectedCells = async () => {
+    if (!meta?.version || !selected.size || !editColumn || (!clearCells && !editValue) || editBusy) return;
+    setEditBusy(true);
+    setError("");
+    try {
+      const edit = await api<{changed: number; newKey: string|null}>("inventory/edit", {
+        version: meta.version,
+        keys: [...selected],
+        column: editColumn,
+        value: clearCells ? "" : editValue,
+      });
+      if (edit.newKey) setSelected(new Set([edit.newKey]));
+      setModal(null);
+      setNotice(edit.changed ? "Changes saved to your inventory CSV." : "The selected cells already have that value.");
+      if (edit.changed) await loadMetadata();
+    } catch (problem) {
+      showError(problem);
+    } finally {
+      setEditBusy(false);
+    }
   };
   useEffect(() => {
     if (modal !== "refresh") return;
@@ -1288,6 +1313,20 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             <div className="selection-bar">
               <strong>{selected.size.toLocaleString()} selected</strong>
               <button
+                className="button"
+                disabled={fileBusy || activeRefresh || !!meta?.importing || editBusy}
+                onClick={() => {
+                  setError("");
+                  setEditColumn("");
+                  setEditValue("");
+                  setClearCells(false);
+                  setModal("edit");
+                }}
+              >
+                <Pencil size={15} />
+                Edit selected
+              </button>
+              <button
                 className="text-button"
                 onClick={() => {
                   setScope("selected");
@@ -1643,6 +1682,37 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               Save inventory
             </button>
           </div>
+        </Modal>
+      )}
+      {modal === "edit" && (
+        <Modal title="Edit selected rows" error={error} onClose={() => { if (!editBusy) setModal(null); }}>
+          <form onSubmit={(event) => { event.preventDefault(); void saveSelectedCells(); }}>
+            <div className="modal-body edit-cells">
+              <p>The new value replaces the chosen CSV cell in {selected.size.toLocaleString()} selected {selected.size === 1 ? "row" : "rows"}.</p>
+              <label>
+                CSV column
+                <select value={editColumn} disabled={editBusy} onChange={(event) => setEditColumn(event.target.value)}>
+                  <option value="">Choose a column</option>
+                  {meta?.headers.map(header => <option key={header}>{header}</option>)}
+                </select>
+              </label>
+              <label>
+                New value
+                <textarea rows={3} value={editValue} disabled={editBusy || clearCells}
+                  onChange={(event) => setEditValue(event.target.value)} />
+              </label>
+              <label className="check-label">
+                <input type="checkbox" checked={clearCells} disabled={editBusy} onChange={(event) => setClearCells(event.target.checked)} />
+                Clear the selected cells
+              </label>
+            </div>
+            <div className="modal-footer">
+              <button type="button" className="button" disabled={editBusy} onClick={() => setModal(null)}>Cancel</button>
+              <button type="submit" className="button primary" disabled={editBusy || !editColumn || (!clearCells && !editValue)}>
+                {editBusy ? "Saving…" : "Save changes"}
+              </button>
+            </div>
+          </form>
         </Modal>
       )}
       {modal === "account" && <Modal title="API.SH account and usage" error={error} onClose={()=>setModal(null)} wide>

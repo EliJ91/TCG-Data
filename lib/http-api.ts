@@ -8,6 +8,7 @@ import {
   facets,
   startImport,
   uploadChunk,
+  editInventory,
   commitImport,
   cancelImport,
   savePreferences,
@@ -43,9 +44,11 @@ export async function handleApi(request:Request,owner:string,path:string,allowed
           await uploadChunk(owner, body.id, body.start, body.rows),
         );
       if (path === "imports/commit")
-        return Response.json(await commitImport(owner, body.id, body.sync === true));
+        return Response.json(await commitImport(owner, body.id, body.sync === true, body.productIdColumn));
       if (path === "imports/cancel")
         return Response.json(await cancelImport(owner, body.id));
+      if (path === "inventory/edit")
+        return Response.json(await editInventory(owner, body));
       if (path === "market/recover") return Response.json(await recoverResult(owner,body.id));
       if (path === "market/product") return Response.json(await linkProduct(owner,body.key,String(body.productId??"")));
       if (path === "market/plan")

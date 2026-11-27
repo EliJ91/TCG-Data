@@ -53,13 +53,15 @@ button:focus-visible,
 a:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 summary:focus-visible,
 tr:focus-visible {
   outline: 3px solid #659b7c99;
   outline-offset: 3px;
 }
 input,
-select {
+select,
+textarea {
   min-width: 0;
   border: 1px solid #dce3dd;
   border-radius: 6px;
@@ -835,6 +837,17 @@ tbody tr:last-child td {
 }
 .modal-body {
   padding: 24px;
+}
+.edit-cells {
+  display: grid;
+  gap: 16px;
+}
+.edit-cells textarea {
+  width: 100%;
+  resize: vertical;
+}
+:root[data-theme="dark"] .edit-cells textarea {
+  border-color: var(--line);
 }
 .modal-body > p {
   font-size: 14px;

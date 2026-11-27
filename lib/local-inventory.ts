@@ -15,9 +15,11 @@ export type SyncMetadata = {
   refresh: Record<string, any> | null;
 };
 export type InventorySnapshot = {meta: SyncMetadata; cards: SyncCard[]};
-export type SyncEvent = Pick<SyncCard,"marketProduct"|"mappedProduct"|"data"|"detail"|"fetchedAt"> & {
-  seq: number; kind: "market"|"sku"; subject: string;
-};
+type SalesFields = Pick<SyncCard,"marketProduct"|"mappedProduct"|"data"|"detail"|"fetchedAt">;
+export type SyncEvent = SalesFields & {seq: number; subject: string} & (
+  {kind: "market"|"sku"} |
+  {kind: "inventory"; rowNo: number|null; raw: string|null; info: string|null; quantity: number|null; extraOriginals: string}
+);
 type Item = Record<string, any>;
 type Input = {filters?: Filters; sort?: string; direction?: string; selected?: string[]; displayColumns?: string[]; page?: number; pageSize?: number};
 

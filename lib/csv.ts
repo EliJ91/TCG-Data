@@ -83,6 +83,14 @@ export function parseCSV(text: string) {
 export function mapColumns(headers: string[]): Mapping {
   return { productId: headers.find(header => aliases.productId.includes(normalizeLabel(header))) ?? "" };
 }
+export function csvInfoField(headers: string[], column: string) {
+  return Object.keys(aliases).find(field => field !== "productId" && field !== "skuId" &&
+    headers.find(header => aliases[field].includes(normalizeLabel(header))) === column);
+}
+export function csvQuantity(value: string) {
+  const quantity = Number(value.trim().replace(/,/g, ""));
+  return Number.isSafeInteger(quantity) && quantity >= 0 ? quantity : 0;
+}
 export function productIdFrom(value: string) {
   const text = value.trim();
   if (/^\d+$/.test(text)) return text.replace(/^0+(?=\d)/, "");
@@ -121,8 +129,7 @@ export function prepareImport(
     const skuId = "",
       productId = productIdFrom(get("productId")),
       name = get("name") || "Product " + productId,
-      rawQuantity = get("quantity").replace(/,/g, ""),
-      quantity = rawQuantity && Number.isSafeInteger(Number(rawQuantity)) && Number(rawQuantity) >= 0 ? Number(rawQuantity) : 0;
+      quantity = csvQuantity(get("quantity"));
     if (!productId) problems.push("Row " + (index + 2) + ": enter a numeric Product ID or a TCGplayer product link in the selected column.");
     if (productId && seen.has(productId)) {duplicateCount++;return;}
     if (productId) seen.add(productId);
