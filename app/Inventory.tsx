@@ -871,15 +871,18 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setSaving(true);
     setError("");
     try {
+      const exportQuery = scopeQuery(exportScope);
+      if (exportAnalysis)
+        exportQuery.filters = {...exportQuery.filters,dateFrom:filters.dateFrom,dateTo:filters.dateTo};
       let blob: Blob;
       if (localEntries) {
-        blob = localExport(localEntries,scopeQuery(exportScope),meta?.headers ?? [],settings.staleHours,exportAnalysis);
+        blob = localExport(localEntries,exportQuery,meta?.headers ?? [],settings.staleHours,exportAnalysis);
       } else {
         const response = await apiFetch("/api/export", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            ...scopeQuery(exportScope),
+            ...exportQuery,
             analysis: exportAnalysis,
           }),
         });
@@ -1492,8 +1495,8 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                                   row[column.key] == null ? "unavailable" : ""
                                 }
                               >
-                                {column.key.startsWith("units") && row.lowerBound &&
-                                row[column.key] !== null
+                                {(column.key === "unitsSold" || column.key === "avgDailySold") && row.lowerBound &&
+                                row[column.key] != null
                                   ? "≥"
                                   : ""}
                                 {!row.analyzed && row[column.key] == null && salesColumnKeys.has(column.key) ? "No Data" : (
@@ -2086,7 +2089,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
             </label>
             <p className="muted small">
               {exportAnalysis
-                ? "Analysis exports include the available retrieved values. Missing values are blank."
+                ? "Analysis exports include sales totals and Avg. Daily Sold for the selected sales dates. Missing values are blank."
                 : "Your original column names and values are preserved. Sales counts do not overwrite your CSV."}
             </p>
           </div>
@@ -2234,14 +2237,13 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                   <p className="small muted">Weekly totals are selected by their reported date. Exact daily counts are not available.</p>
                 </>}
                 <div className="detail-metrics">
-                  {marketColumns
+                  {marketColumns.filter(column => column.key !== "avgDailySold" || settings.visibleColumns.includes(column.key))
                     .map((column) => (
                       <div key={column.key}>
                         <span title={column.note}>{column.label}</span>
                         <strong>
-                          {column.key.startsWith("units") && card.market?.lowerBound &&
-                          card.market?.[column.key] !== null &&
-                          card.market?.[column.key] !== undefined
+                          {(column.key === "unitsSold" || column.key === "avgDailySold") && card.market?.lowerBound &&
+                          (selectedCardRow ? selectedCardRow[column.key] : card.market?.[column.key]) != null
                             ? "≥"
                             : ""}
                           {!card.market?.analyzed && !card.market?.available ? "No Data" : formatValue(

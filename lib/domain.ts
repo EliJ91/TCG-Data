@@ -26,7 +26,7 @@ export function hasDisplayValue(value: unknown) {
   return !isBlankCategory(value) && (typeof value !== "string" || value.trim().toUpperCase() !== "N/A");
 }
 export function isNumericFilterColumn(key: string) {
-  if (key === "unitsSold" || key === "quantity") return true;
+  if (key === "unitsSold" || key === "avgDailySold" || key === "quantity") return true;
   if (!key.startsWith("csv:")) return false;
   const header = normalizeLabel(key.slice(4));
   return header.includes("price") || header.includes("quantity") || header === "qty" || header === "stock" || header === "unitssold";
@@ -130,7 +130,7 @@ export function normalizeView(value: Partial<ViewPreferences> = {}): ViewPrefere
 export type Column = {
   key: string;
   label: string;
-  kind: "text" | "number" | "date" | "salesDate";
+  kind: "text" | "number" | "decimal" | "date" | "salesDate";
   note?: string;
 };
 export const columns: Column[] = [
@@ -145,6 +145,7 @@ export const columns: Column[] = [
   { key: "language", label: "Language", kind: "text" },
   { key: "quantity", label: "Owned", kind: "number" },
   {key: "unitsSold", label: "Units sold", kind: "number", note: "Reported quantities in the selected sales dates. Weekly totals are not split into individual days."},
+  {key: "avgDailySold", label: "Avg. Daily Sold", kind: "decimal", note: "Units sold divided by the number of calendar days, including both dates. Unset dates use this product’s saved history dates."},
   {key: "scope", label: "Sales coverage", kind: "text"},
   {key: "historyFrom", label: "History starts", kind: "salesDate"},
   {key: "historyTo", label: "History ends", kind: "salesDate"},
@@ -227,6 +228,7 @@ export function formatValue(value: unknown, kind: Column["kind"]) {
       timeZone: kind === "salesDate" ? "UTC" : undefined,
     });
   if (kind === "number") return Number(value).toLocaleString(undefined, {maximumFractionDigits: 0});
+  if (kind === "decimal") return Number(value).toLocaleString(undefined, {maximumFractionDigits: 3});
   return String(value);
 }
 export const normalizeLabel = (value: string) =>

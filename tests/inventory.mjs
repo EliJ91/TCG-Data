@@ -524,6 +524,42 @@ test("Warm sync transfers only changed inventory rows and marketplace events", a
  await assert.rejects(()=>sync.limitOperation(owner,"test-window",1,60000),{status:429});
 });
 
+test("Avg. Daily Sold uses the selected dates and agrees across the table and exports", async () => {
+ const initial = await upload("Lookup,Name\n87101,First\n87102,Zero\n87103,Missing\n87104,Incomplete");
+ const first = Date.UTC(2026,0,1), second = Date.UTC(2026,0,8);
+ const insert = sql.prepare("INSERT INTO market(id,owner,card_key,product_id,fetched_at,data,detail) VALUES (?,?,?,?,?,?,?)");
+ for (const [id,units] of [["87101",[14,7]],["87102",[0,0]],["87104",[5,null]]]) {
+  const key = "product:"+id+"|row:0";
+  insert.run(owner+"|"+key,owner,key,id,second,
+   JSON.stringify({available:true,granularity:"weekly",historyFrom:first,historyTo:second}),
+   JSON.stringify({history:[{date:first,units:units[0]},{date:second,units:units[1]}]}));
+ }
+ const meta = await sync.syncMetadata(owner,null);
+ const snapshot = await sync.syncInventory(owner,new URLSearchParams({version:meta.version}));
+ const entries = local.indexInventory(snapshot.rows);
+ const dateRange = (dateFrom,dateTo) => ({...domain.emptyFilters,dateFrom,dateTo});
+ const input = {filters:dateRange("2026-01-01","2026-01-10"),sort:"avgDailySold",direction:"desc"};
+ const metric = result => result.rows.map(row=>[row.productId,row.avgDailySold]);
+ const both = async (query, expected) => {
+  assert.deepEqual(metric(await data.queryCards(owner,query)),expected);
+  assert.deepEqual(metric(local.queryLocalInventory(entries,query,24)),expected);
+ };
+ assert(domain.inventoryColumns(initial.headers).some(column=>column.label==="Avg. Daily Sold"));
+ assert(!initial.settings.visibleColumns.includes("avgDailySold"));
+ assert.notEqual(domain.formatValue(0.125,"decimal"),domain.formatValue(0,"decimal"));
+ await both(input,[["87101",2.1],["87102",0],["87103",null],["87104",null]]);
+ await both({...input,filters:dateRange("2026-01-08","2026-01-08")},[["87101",7],["87102",0],["87103",null],["87104",null]]);
+ await both({...input,filters:dateRange("","")},[["87101",2.625],["87102",0],["87103",null],["87104",null]]);
+ await both({...input,filters:{...dateRange("","2026-01-04"),numeric:[{field:"avgDailySold",min:"3",max:"4"}]}},[["87101",3.5]]);
+ await both({...input,filters:dateRange("2026-01-02","2026-01-03")},[["87101",null],["87102",null],["87103",null],["87104",null]]);
+ const analysis = await local.localExport(entries,input,meta.headers,24,true).text();
+ assert.deepEqual(csv.parseCSV(analysis),csv.parseCSV(await (await data.exportInventory(owner,{...input,analysis:true})).text()));
+ const parsed = csv.parseCSV(analysis);
+ const avg = parsed.headers.indexOf("Avg. Daily Sold");
+ assert.deepEqual(parsed.records.map(row=>row[avg]),["2.1","0","",""]);
+ assert.deepEqual(csv.parseCSV(await local.localExport(entries,input,meta.headers,24,false).text()).headers,["Lookup","Name"]);
+});
+
 test("Visible-column facets and filters use raw CSV values and the displayed sales period",async()=>{
  const header = "Seller's \"Tags\"";
  const csvRows = [

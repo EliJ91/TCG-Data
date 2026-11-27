@@ -550,7 +550,7 @@ export type QueryInput = {
   selected?: string[];
   displayColumns?: string[];
 };
-export function buildQuery(owner: string, space: Workspace, input: QueryInput, forCount = false, fields?: readonly string[]) {
+export function buildQuery(owner: string, space: Workspace, input: QueryInput, forCount = false, fields?: readonly string[] | "table") {
   const p = preferences(space),
     e = expressions(p),
     f = input.filters;
@@ -565,6 +565,8 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
     const dates = [from !== null ? "json_extract(h.value,'$.date')>="+from : "1", to !== null ? "json_extract(h.value,'$.date')<"+(to+86400000) : "1"].join(" AND ");
     e.unitsSold = "(SELECT CASE WHEN COUNT(*)=0 OR SUM(CASE WHEN json_extract(h.value,'$.units') IS NULL OR json_extract(h.value,'$.units')<0 THEN 1 ELSE 0 END)>0 THEN NULL ELSE SUM(json_extract(h.value,'$.units')) END FROM json_each(m.detail,'$.history') h WHERE "+dates+")";
   }
+  const start = from ?? e.historyFrom, end = to ?? e.historyTo;
+  e.avgDailySold = `CASE WHEN ${end}>=${start} THEN 1.0*(${e.unitsSold})/((${end}-${start})/86400000.0+1) END`;
 
   const values: unknown[] = [owner, space.active_version ?? ""],
     where = ["c.owner=?", "c.version=?"];
@@ -646,10 +648,12 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
     partial: "json_extract(m.data,'$.partial')",
     available: "json_extract(m.data,'$.available')",
   };
-  const select = ["c.card_key AS key", ...(fields ?? Object.keys(output))
+  const projected = fields === "table"
+    ? Object.keys(output).filter(key => key !== "avgDailySold" || !input.displayColumns || input.displayColumns.includes(key))
+    : fields ?? Object.keys(output);
+  const select = ["c.card_key AS key", ...projected
     .map((key) => output[key] + ' AS ' + quote(key))].join(",");
-  const order =
-    e[sort] + " IS NULL," + e[sort] + ' ' + direction + ",c.card_key ASC";
+  const order = e[sort] + " " + direction + " NULLS LAST,c.card_key ASC";
   const limit = f?.limit === 50 || f?.limit === 100 ? f.limit : 0;
   const sql =
     "SELECT " +
@@ -664,7 +668,7 @@ export function buildQuery(owner: string, space: Workspace, input: QueryInput, f
 }
 export async function queryCards(owner: string, input: QueryInput) {
   const space = await workspace(owner),
-    query = buildQuery(owner, space, input),
+    query = buildQuery(owner, space, input, false, "table"),
     db = database();
   const requested = Math.max(1, Math.floor(Number(input.page) || 1)),
     pageSize = [25, 50, 100].includes(Number(input.pageSize))

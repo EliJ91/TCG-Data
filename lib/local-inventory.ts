@@ -44,7 +44,8 @@ export function indexInventory(cards: SyncCard[]) {
   });
 }
 type Entry = ReturnType<typeof indexInventory>[number];
-const salesWindowColumns = new Set(["unitsSold","historyFrom","historyTo"]);
+const salesWindowColumns = new Set(["unitsSold","avgDailySold","historyFrom","historyTo"]);
+const DAY_MS = 86_400_000;
 const asciiLower = (value: string) => value.replace(/[A-Z]/g,c=>c.toLowerCase());
 const ascending = (a: string|number,b: string|number) =>
   typeof a === typeof b ? a < b ? -1 : a > b ? 1 : 0 : typeof a === "number" ? -1 : 1;
@@ -68,19 +69,20 @@ export function describeInventory(entries: Entry[]) {
 }
 
 function reportedUnits(history: Item[], from: number|null, to: number|null) {
-  const visible = history.filter(point => (from === null || point.date >= from) && (to === null || point.date < to + 86400000));
+  const visible = history.filter(point => (from === null || point.date >= from) && (to === null || point.date < to + DAY_MS));
   return visible.length && visible.every(point=>point.units != null && point.units >= 0)
     ? visible.reduce((sum,point)=>sum+Number(point.units),0) : null;
 }
 
 function rowWithSalesWindow({row,detail}: Entry, from: number|null, to: number|null): Item {
   const history: Item[] = detail.history ?? [];
-  return {
-    ...row,
-    unitsSold: from !== null || to !== null ? reportedUnits(history,from,to) : row.unitsSold ?? reportedUnits(history,null,null),
-    historyFrom: row.historyFrom ?? history[0]?.date ?? null,
-    historyTo: row.historyTo ?? history.at(-1)?.date ?? null,
-  };
+  const unitsSold = from !== null || to !== null ? reportedUnits(history,from,to) : row.unitsSold ?? reportedUnits(history,null,null);
+  const historyFrom = row.historyFrom ?? history[0]?.date ?? null;
+  const historyTo = row.historyTo ?? history.at(-1)?.date ?? null;
+  const start = from ?? historyFrom, end = to ?? historyTo;
+  const avgDailySold = unitsSold != null && start != null && end != null && end >= start
+    ? unitsSold / ((end - start) / DAY_MS + 1) : null;
+  return {...row,unitsSold,historyFrom,historyTo,avgDailySold};
 }
 
 export function inventoryFacets(entries: Entry[], keys: string[], dateFrom: string, dateTo: string) {
