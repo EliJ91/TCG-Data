@@ -1378,12 +1378,12 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               </div>
             </section>
           )}
-          {selected.size > 0 && (
-            <div className="selection-bar">
-              <strong>{selected.size.toLocaleString()} selected</strong>
+          {hasInventory && (
+            <div className="selection-bar" role="group" aria-label="Row selection actions">
+              <strong aria-live="polite">{selected.size.toLocaleString()} selected</strong>
               <button
                 className="button"
-                disabled={rowMutationsDisabled}
+                disabled={!selected.size || rowMutationsDisabled}
                 onClick={() => openCellEditor(null)}
               >
                 <Pencil size={15} />
@@ -1391,7 +1391,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               </button>
               <button
                 className="button danger-text"
-                disabled={rowMutationsDisabled}
+                disabled={!selected.size || rowMutationsDisabled}
                 onClick={() => {
                   setError("");
                   setModal("delete");
@@ -1402,6 +1402,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               </button>
               <button
                 className="text-button"
+                disabled={!selected.size}
                 onClick={() => {
                   setScope("selected");
                   setPullMode("missing");
@@ -1412,6 +1413,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               </button>
               <button
                 className="text-button"
+                disabled={!selected.size}
                 onClick={() => {
                   setExportScope("selected");
                   setModal("export");
@@ -1421,6 +1423,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               </button>
               <button
                 className="text-button muted"
+                disabled={!selected.size}
                 onClick={() => setSelected(new Set())}
               >
                 Clear selection
@@ -1493,6 +1496,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                     {result.rows.map((row) => (
                       <tr
                         key={row.key}
+                        className={selected.has(row.key) ? "selected-row" : undefined}
                         tabIndex={0}
                         onClick={() => void openCard(row)}
                         onKeyDown={(event) => {
