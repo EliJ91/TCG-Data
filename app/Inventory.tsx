@@ -82,6 +82,7 @@ type Result = {
   lastRefreshed: number | null;
 };
 type PullMode = "missing" | "all";
+type EditableCell = {key: string; column: string; value: string; version: string};
 type FailedProduct = {id:string; productId:string; startedAt:number};
 type FailurePage = {failures:FailedProduct[]; next:string|null};
 const initialResult: Result = {
@@ -321,6 +322,24 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     [editValue, setEditValue] = useState(""),
     [clearCells, setClearCells] = useState(false),
     [rowMutationBusy, setRowMutationBusy] = useState(false);
+  const [editingCell, setEditingCell] = useState<EditableCell|null>(null);
+  const [cellMenu, setCellMenu] = useState<{cell: EditableCell; x: number; y: number}|null>(null);
+  const cellMenuRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!cellMenu) return;
+    const close = () => setCellMenu(null);
+    const closeOutside = (event: PointerEvent) => {
+      if (!cellMenuRef.current?.contains(event.target as Node)) close();
+    };
+    document.addEventListener("pointerdown",closeOutside,true);
+    window.addEventListener("scroll",close,true);
+    window.addEventListener("resize",close);
+    return () => {
+      document.removeEventListener("pointerdown",closeOutside,true);
+      window.removeEventListener("scroll",close,true);
+      window.removeEventListener("resize",close);
+    };
+  },[cellMenu]);
   const [settings, setSettings] = useState<Preferences>(defaults),
     [saving, setSaving] = useState(false);
   const [snapshot, setSnapshot] = useState<InventorySnapshot|null>(null);
@@ -735,20 +754,41 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
     setFile(null);
     setImportId(null);
   };
-  const saveSelectedCells = async () => {
-    if (!meta?.version || !selected.size || !editColumn || (!clearCells && !editValue) || rowMutationBusy) return;
+  const openCellEditor = (cell: EditableCell|null) => {
+    setError("");
+    setCellMenu(null);
+    setEditingCell(cell);
+    setEditColumn(cell?.column ?? "");
+    setEditValue(cell?.value ?? "");
+    setClearCells(false);
+    setModal("edit");
+  };
+  const canSaveCells = !rowMutationBusy && !!editColumn &&
+    (!!editingCell || selected.size > 0 && (!!editValue || clearCells));
+  const saveCells = async () => {
+    const version = editingCell?.version ?? meta?.version;
+    const keys = editingCell ? [editingCell.key] : [...selected];
+    if (!version || !keys.length || !canSaveCells) return;
     setRowMutationBusy(true);
     setError("");
     try {
       const edit = await api<{changed: number; newKey: string|null}>("inventory/edit", {
-        version: meta.version,
-        keys: [...selected],
+        version,
+        keys,
         column: editColumn,
         value: clearCells ? "" : editValue,
       });
-      if (edit.newKey) setSelected(new Set([edit.newKey]));
+      const newKey = edit.newKey;
+      if (newKey && newKey !== keys[0]) setSelected(current => {
+        if (!current.has(keys[0])) return current;
+        const next = new Set(current);
+        next.delete(keys[0]);
+        next.add(newKey);
+        return next;
+      });
       setModal(null);
-      setNotice(edit.changed ? "Changes saved to your inventory CSV." : "The selected cells already have that value.");
+      setNotice(edit.changed ? "Changes saved to your inventory CSV." :
+        editingCell ? "This cell already has that value." : "The selected cells already have that value.");
       if (edit.changed) await loadMetadata();
     } catch (problem) {
       showError(problem);
@@ -1344,13 +1384,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
               <button
                 className="button"
                 disabled={rowMutationsDisabled}
-                onClick={() => {
-                  setError("");
-                  setEditColumn("");
-                  setEditValue("");
-                  setClearCells(false);
-                  setModal("edit");
-                }}
+                onClick={() => openCellEditor(null)}
               >
                 <Pencil size={15} />
                 Edit selected
@@ -1485,6 +1519,16 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                           <td
                             key={column.key}
                             className={column.kind === "text" ? "" : "numeric"}
+                            onContextMenu={column.key.startsWith("csv:") ? event => {
+                              if (rowMutationsDisabled || !meta?.version) return;
+                              event.preventDefault();
+                              const bounds = event.currentTarget.getBoundingClientRect();
+                              setCellMenu({
+                                cell: {key:row.key,column:column.key.slice(4),value:String(row[column.key] ?? ""),version:meta.version},
+                                x:event.clientX || bounds.left,
+                                y:event.clientY || bounds.top,
+                              });
+                            } : undefined}
                           >
                             {column.key === "name" ? (
                               <div className="card-name">
@@ -1737,31 +1781,45 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           </div>
         </Modal>
       )}
+      {cellMenu && (
+        <div ref={cellMenuRef} className="cell-context-menu" role="menu" aria-label="CSV cell actions"
+          style={{left:`clamp(4px, ${cellMenu.x}px, calc(100vw - 112px))`,
+            top:`clamp(4px, ${cellMenu.y}px, calc(100vh - 48px))`}}
+          onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setCellMenu(null); }}
+          onKeyDown={event => { if (event.key === "Escape") setCellMenu(null); }}>
+          <button type="button" role="menuitem" autoFocus onClick={() => openCellEditor(cellMenu.cell)}>
+            <Pencil size={15} />
+            Edit
+          </button>
+        </div>
+      )}
       {modal === "edit" && (
-        <Modal title="Edit selected rows" error={error} onClose={() => { if (!rowMutationBusy) setModal(null); }}>
-          <form onSubmit={(event) => { event.preventDefault(); void saveSelectedCells(); }}>
+        <Modal title={editingCell ? "Edit " + editingCell.column : "Edit selected rows"} error={error} onClose={() => { if (!rowMutationBusy) setModal(null); }}>
+          <form onSubmit={(event) => { event.preventDefault(); void saveCells(); }}>
             <div className="modal-body edit-cells">
-              <p>The new value replaces the chosen CSV cell in {selected.size.toLocaleString()} selected {selected.size === 1 ? "row" : "rows"}.</p>
+              {!editingCell && <>
+                <p>The new value replaces the chosen CSV cell in {selected.size.toLocaleString()} selected {selected.size === 1 ? "row" : "rows"}.</p>
+                <label>
+                  CSV column
+                  <select value={editColumn} disabled={rowMutationBusy} onChange={(event) => setEditColumn(event.target.value)}>
+                    <option value="">Choose a column</option>
+                    {meta?.headers.map(header => <option key={header}>{header}</option>)}
+                  </select>
+                </label>
+              </>}
               <label>
-                CSV column
-                <select value={editColumn} disabled={rowMutationBusy} onChange={(event) => setEditColumn(event.target.value)}>
-                  <option value="">Choose a column</option>
-                  {meta?.headers.map(header => <option key={header}>{header}</option>)}
-                </select>
-              </label>
-              <label>
-                New value
-                <textarea rows={3} value={editValue} disabled={rowMutationBusy || clearCells}
+                {editingCell ? "Value" : "New value"}
+                <textarea rows={3} value={editValue} disabled={rowMutationBusy || clearCells} autoFocus={!!editingCell}
                   onChange={(event) => setEditValue(event.target.value)} />
               </label>
-              <label className="check-label">
+              {!editingCell && <label className="check-label">
                 <input type="checkbox" checked={clearCells} disabled={rowMutationBusy} onChange={(event) => setClearCells(event.target.checked)} />
                 Clear the selected cells
-              </label>
+              </label>}
             </div>
             <div className="modal-footer">
               <button type="button" className="button" disabled={rowMutationBusy} onClick={() => setModal(null)}>Cancel</button>
-              <button type="submit" className="button primary" disabled={rowMutationBusy || !editColumn || (!clearCells && !editValue)}>
+              <button type="submit" className="button primary" disabled={!canSaveCells}>
                 {rowMutationBusy ? "Saving…" : "Save changes"}
               </button>
             </div>
