@@ -1,5 +1,5 @@
 "use client";
-import { lazy, Suspense, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { lazy, Suspense, useEffect, useId, useMemo, useRef, useState, type ReactNode } from "react";
 import { apiFetch, appHome, inventoryCacheScope } from "../lib/client-api";
 import {
   Layers3,
@@ -127,13 +127,16 @@ function Modal({
   error?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
+  const titleId = useId();
   useEffect(() => {
-    ref.current?.showModal();
-    return () => ref.current?.close();
+    const dialog = ref.current;
+    dialog?.showModal();
+    return () => dialog?.close();
   }, []);
   return (
     <dialog
       ref={ref}
+      aria-labelledby={titleId}
       className={wide ? "modal wide" : "modal"}
       onCancel={(event) => {
         event.preventDefault();
@@ -144,7 +147,7 @@ function Modal({
       }}
     >
       <div className="modal-heading">
-        <h2>{title}</h2>
+        <h2 id={titleId}>{title}</h2>
         <button
           className="icon-button"
           aria-label="Close dialog"
@@ -354,6 +357,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
   const touchDrag = useRef<string | null>(null);
   const [card, setCard] = useState<RecordValue | null>(null),
     [cardLoading, setCardLoading] = useState(false);
+  const [imagePreview, setImagePreview] = useState<{src: string; name: string; failed?: boolean}|null>(null);
   const [file, setFile] = useState<{
     name: string;
     text: string;
@@ -1560,6 +1564,7 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
                                     value={row[column.key]}
                                     column={column}
                                     cardName={row.name || "Card " + row.productId}
+                                    onOpenImage={(src, name) => setImagePreview({src, name})}
                                   />
                                 )}
                               </span>
@@ -1692,6 +1697,17 @@ export default function Inventory({onSignOut}:{onSignOut?:()=>void}={}) {
           }}
         />
       </main>
+      {imagePreview && (
+        <Modal title={imagePreview.name} onClose={() => setImagePreview(null)} wide>
+          <div className="modal-body card-image-preview">
+            {imagePreview.failed ? <p role="status">Image unavailable</p> : (
+              <img src={imagePreview.src} alt={imagePreview.name} referrerPolicy="no-referrer"
+                onError={() => setImagePreview(current =>
+                  current?.src === imagePreview.src ? {...current,failed:true} : current)} />
+            )}
+          </div>
+        </Modal>
+      )}
       {file && (
         <Modal
           error={error}

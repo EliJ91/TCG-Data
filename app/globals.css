@@ -490,6 +490,9 @@ tbody tr:last-child td {
   justify-content: center;
   width: 64px;
   height: 90px;
+  padding: 0;
+  border: 0;
+  background: transparent;
   vertical-align: middle;
   border-radius: 4px;
   overflow: hidden;
@@ -858,12 +861,24 @@ tbody tr:last-child td {
   border-bottom: 1px solid var(--line);
 }
 .modal-heading h2 {
+  min-width: 0;
+  overflow-wrap: anywhere;
   font-size: 18px;
   letter-spacing: -0.4px;
   font-weight: 550;
 }
 .modal-body {
   padding: 24px;
+}
+.card-image-preview {
+  display: grid;
+  justify-items: center;
+}
+.card-image-preview img {
+  display: block;
+  max-width: 100%;
+  max-height: 72dvh;
+  object-fit: contain;
 }
 .edit-cells {
   display: grid;

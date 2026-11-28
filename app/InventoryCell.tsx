@@ -15,23 +15,26 @@ function imageSource(value: unknown, column: Column) {
   }
 }
 
-export default function InventoryCell({ value, column, cardName }: {
+export default function InventoryCell({ value, column, cardName, onOpenImage }: {
   value: unknown;
   column: Column;
   cardName: string;
+  onOpenImage: (src: string, name: string) => void;
 }) {
   const [failedSource, setFailedSource] = useState<string | null>(null);
   const source = imageSource(value, column);
   if (!source) return <>{formatValue(value, column.kind)}</>;
   return (
-    <a
+    <button
+      type="button"
       className="card-thumbnail"
-      href={source}
-      target="_blank"
-      rel="noopener noreferrer"
-      title="Open full-size card image"
-      aria-label={"Open image of " + cardName}
-      onClick={(event) => event.stopPropagation()}
+      title="View larger card image"
+      aria-label={"View image of " + cardName}
+      aria-haspopup="dialog"
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpenImage(source, cardName);
+      }}
       onKeyDown={(event) => event.stopPropagation()}
     >
       {failedSource === source ? (
@@ -48,6 +51,6 @@ export default function InventoryCell({ value, column, cardName }: {
           onError={() => setFailedSource(source)}
         />
       )}
-    </a>
+    </button>
   );
 }
